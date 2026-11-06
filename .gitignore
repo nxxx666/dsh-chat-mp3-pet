@@ -1,0 +1,23 @@
+# 个人配置与运行数据（绝不入库）
+config.json
+memory.db
+最近一次回复.txt
+_trace.log
+_crash.log
+*.log
+
+# 打包与缓存产物
+__pycache__/
+*.pyc
+build*/
+dist*/
+*.spec.bak
+
+# 音乐目录：说明文件以外的歌都不入库（避免误传版权音乐）
+music/*
+!music/放音乐到这里.txt
+
+# 本地图片/临时文件
+*.png.tmp
+.DS_Store
+Thumbs.db

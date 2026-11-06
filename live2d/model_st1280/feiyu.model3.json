@@ -1,0 +1,68 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "feiyu.moc3",
+		"Textures": [
+			"feiyu.4096/texture_00.png"
+		],
+		"Physics": "feiyu.physics3.json",
+		"DisplayInfo": "feiyu.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "微笑",
+				"File": "feiyu.smile.exp3.json"
+			},
+			{
+				"Name": "悲伤",
+				"File": "feiyu.sad.exp3.json"
+			},
+			{
+				"Name": "生气",
+				"File": "feiyu.angry.exp3.json"
+			},
+			{
+				"Name": "惊讶",
+				"File": "feiyu.surprised.exp3.json"
+			}
+		],
+		"Motions": {
+			"Idle": [
+				{
+					"File": "feiyu.idle.motion3.json"
+				}
+			],
+			"Blink": [
+				{
+					"File": "feiyu.blink.motion3.json"
+				}
+			],
+			"Nod": [
+				{
+					"File": "feiyu.nod.motion3.json"
+				}
+			],
+			"Shake": [
+				{
+					"File": "feiyu.shake.motion3.json"
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY"
+			]
+		}
+	]
+}

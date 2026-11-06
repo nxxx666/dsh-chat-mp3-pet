@@ -1,0 +1,21 @@
+{
+  "x": 200,
+  "y": 200,
+  "volume": 0.65,
+  "shuffle": false,
+  "loop_one": false,
+  "persona": "大肥鱼",
+  "anim_pose": "sit",
+  "pet_scale": 1.0,
+  "ai_provider": "deepseek",
+  "ai_api_key": "",
+  "ai_model": "deepseek-flash",
+  "ai_base_url": "https://api.deepseek.com",
+  "ai_thinking": true,
+  "ai_reply_style": "short",
+  "model": "qwen2.5:3b",
+  "ai_mode": "deepseek",
+  "memory_enabled": true,
+  "memory_recall": 3,
+  "memory_summary": true
+}

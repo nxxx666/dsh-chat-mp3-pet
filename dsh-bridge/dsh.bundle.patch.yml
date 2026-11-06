@@ -1,0 +1,5 @@
+# dsh-pet-bridge 的 bundle 层：装到 profile 的 dsh.profile.bundles 后自动挂载。
+# 只 insert 一行，不改动 DSH 自身的任何条目。
+- insert:
+    - id: pet-bridge
+      name: dsh-pet-bridge

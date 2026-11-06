@@ -1,0 +1,71 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "feiyu_live2d.moc3",
+		"Textures": [
+			"feiyu_live2d.4096/texture_00.png",
+			"feiyu_live2d.4096/texture_01.png",
+			"feiyu_live2d.4096/texture_02.png",
+			"feiyu_live2d.4096/texture_03.png",
+			"feiyu_live2d.4096/texture_04.png"
+		],
+		"DisplayInfo": "feiyu_live2d.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "微笑",
+				"File": "feiyu_live2d.smile.exp3.json"
+			},
+			{
+				"Name": "悲伤",
+				"File": "feiyu_live2d.sad.exp3.json"
+			},
+			{
+				"Name": "生气",
+				"File": "feiyu_live2d.angry.exp3.json"
+			},
+			{
+				"Name": "惊讶",
+				"File": "feiyu_live2d.surprised.exp3.json"
+			}
+		],
+		"Motions": {
+			"Idle": [
+				{
+					"File": "feiyu_live2d.idle.motion3.json"
+				}
+			],
+			"Blink": [
+				{
+					"File": "feiyu_live2d.blink.motion3.json"
+				}
+			],
+			"Nod": [
+				{
+					"File": "feiyu_live2d.nod.motion3.json"
+				}
+			],
+			"Shake": [
+				{
+					"File": "feiyu_live2d.shake.motion3.json"
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY"
+			]
+		}
+	]
+}

@@ -1,0 +1,37 @@
+MIT License
+
+Copyright (c) 2026 dsh-desktop-pet contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+第三方组件声明（Third-Party Notices）
+
+1. Live2D Cubism Core
+   本项目的 Live2D 渲染基于 live2d-py（MIT License），其中包含的
+   Live2D Cubism Core（live2d 的核心动态库）由 Live2D Inc. 提供，
+   遵循 Live2D Proprietary Software License Agreement（免费可再分发，
+   但须保留其版权声明，且不得对库本身进行逆向工程或修改）。
+   详见: https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html
+   Live2D Cubism 是 Live2D Inc. 的注册商标。
+
+2. 本仓库中的 Live2D 模型文件（live2d/model*/，含 .moc3/.can3/.cmo3 及贴图）
+   为本项目的原创美术资产，仅供 dsh-desktop-pet 及其衍生桌面宠物使用，
+   不得单独提取用于其他商业项目。
