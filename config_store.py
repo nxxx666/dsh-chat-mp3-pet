@@ -38,6 +38,7 @@ DEFAULTS = {
     # ---- DSH 模式（把话交给 DeepSeek Harness 的会话）----
     "ai_mode": "standalone",     # standalone = 桌宠自己调模型；dsh = 用 DSH 的会话/记忆/工具
     "dsh_session_id": "",        # 上次聊的那个 DSH 会话，下次接着用
+    "dsh_exe_path": "",          # DSH 桌面版 exe 位置；留空则按常见位置自动找（用于自动拉起 DSH）
 }
 
 

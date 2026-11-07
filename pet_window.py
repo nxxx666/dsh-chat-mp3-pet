@@ -121,10 +121,11 @@ class DshChatWorker(QThread):
     finished_ok = pyqtSignal(str)
     session_ready = pyqtSignal(str)
 
-    def __init__(self, text: str, session_id: str = ""):
+    def __init__(self, text: str, session_id: str = "", dsh_exe: str = ""):
         super().__init__()
         self.text = text
         self.session_id = session_id or ""
+        self.dsh_exe = dsh_exe or ""
         self._stop_ev = threading.Event()
         self.client = None
 
@@ -149,9 +150,18 @@ class DshChatWorker(QThread):
                 self.client.attach(self.session_id)
 
             ok, info = self.client.health()
+            if not ok and not self._stop_ev.is_set():
+                # 桥没在监听 = DSH 大概率没开。自救：帮用户把 DSH 拉起来再等就绪
+                self.note.emit("DSH 桌面版没开着，正在帮你启动…（首次启动要等一会儿）")
+                ok, info = dsh_client.ensure_dsh_running(
+                    self.dsh_exe, timeout=45.0, stop_ev=self._stop_ev)
+                if ok:
+                    self.note.emit("DSH 已就绪，继续～")
             if not ok:
                 why = (info or {}).get("error") or "桥插件没在监听"
-                self.failed.emit(f"连不上 DSH：{why}")
+                self.failed.emit(
+                    f"连不上 DSH：{why}\n"
+                    f"（先打开 DSH 桌面版试试；还不行就检查 pet-bridge 插件是否装好）")
                 return
 
             good, sid, err = self.client.prompt(self.text)
@@ -558,6 +568,10 @@ class PetWindow(QWidget):
         # DSH 模式：把话交给 DSH 的会话，会话 id 记在配置里（重启后接着聊）
         self._dsh_session_id = self.cfg.get("dsh_session_id") or ""
         self._dsh_last_error = ""
+        # 开机预热：DSH 模式下桥没在监听（多半是 DSH 没开）→ 后台静默拉起，
+        # 等用户真正开口时 DSH 基本已经就绪，不会再看到「连不上」
+        if self.ai_mode() == MODE_DSH:
+            threading.Thread(target=self._prewarm_dsh, daemon=True).start()
 
         # 长期记忆：每句话都落一份到 memory.db，提问时按相关度把旧片段捞回来
         self.memory = memory.MemoryStore()
@@ -1363,6 +1377,23 @@ class PetWindow(QWidget):
             return MODE_STANDALONE
         return MODE_DSH if self.cfg.get("ai_mode") == MODE_DSH else MODE_STANDALONE
 
+    def _prewarm_dsh(self):
+        """后台线程：DSH 模式下桥没在监听时，静默把 DSH 桌面版拉起来。
+
+        开机预热用，不弹气泡——等用户真正开口时 DSH 基本已就绪；
+        就绪失败也不打扰，等真发消息时 worker 会再试并给出完整提示。
+        """
+        try:
+            ok, _ = dsh_client.DshClient().health()
+            if ok:
+                return
+            trace.log("prewarm: bridge down, launching DSH")
+            ok, info = dsh_client.ensure_dsh_running(
+                config_store.load().get("dsh_exe_path", ""), timeout=40.0)
+            trace.log("prewarm: %s" % ("ok" if ok else (info or {}).get("error", "?")))
+        except Exception as exc:  # 后台线程，绝不能拖垮启动流程
+            trace.log("prewarm error: %r" % exc)
+
     def _send_via_dsh(self, text: str):
         """DSH 模式：不建自己的上下文，直接把话送进 DSH 的会话。"""
         self.bubble.set_text("...")
@@ -1372,7 +1403,9 @@ class PetWindow(QWidget):
         self._interrupted = False
         self._music_bubble_timer = 0.0
 
-        self._spawn_worker(DshChatWorker(text, self._dsh_session_id), [
+        self._spawn_worker(DshChatWorker(
+            text, self._dsh_session_id,
+            dsh_exe=config_store.load().get("dsh_exe_path", "")), [
             ("chunk", self._on_chunk),
             ("note", self._on_dsh_note),
             ("failed", self._on_failed),

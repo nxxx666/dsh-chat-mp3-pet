@@ -352,3 +352,91 @@ def wait_for_bridge(seconds=8.0, interval=0.5):
         time.sleep(interval)
     ok, info = DshClient().health()
     return ok, info
+
+
+# ---------- 自动拉起 DSH 桌面版 ----------
+# 桥插件活在 DSH 进程里：DSH 没开 → 47110 没人听 → DSH 模式没法聊。
+# 这里负责「找到 DSH 装在哪」和「把它拉起来」，供桌宠在连不上桥时自救。
+
+_DSH_EXE_CANDIDATES = (
+    r"D:\dsh\新建文件夹\DeepSeek Harness.exe",          # 本机实际安装位置
+    r"%LOCALAPPDATA%\Programs\DeepSeek Harness\DeepSeek Harness.exe",
+    r"%LOCALAPPDATA%\Programs\dsh\DeepSeek Harness.exe",
+    r"C:\Program Files\DeepSeek Harness\DeepSeek Harness.exe",
+)
+
+
+def find_dsh_exe(prefer=""):
+    """按 用户配置 → 常见安装位置 → Programs 目录扫描 的顺序找 DSH exe。
+
+    返回存在的那个路径；都找不到返回 ""。
+    """
+    import glob
+
+    tries = [prefer]
+    tries += _DSH_EXE_CANDIDATES
+    for t in tries:
+        if t and os.path.isfile(os.path.expandvars(t)):
+            return os.path.expandvars(t)
+    # 最后一搏：用户级 Electron 安装目录通常在 %LOCALAPPDATA%\Programs\<名字>\
+    for pat in (
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\*") + os.sep + "DeepSeek Harness.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\*\*") + os.sep + "DeepSeek Harness.exe",
+    ):
+        for hit in sorted(glob.glob(pat))[:1]:
+            if os.path.isfile(hit):
+                return hit
+    return ""
+
+
+def launch_dsh(exe=""):
+    """启动 DSH 桌面版（分离进程）。返回是否成功拉起。
+
+    坑：若环境里有 ELECTRON_RUN_AS_NODE=1，Electron 会降级成纯 node，
+    桌面版起不来——启动子进程前必须把它从环境里剔掉。
+    """
+    path = find_dsh_exe(exe)
+    if not path:
+        return False
+    env = {k: v for k, v in os.environ.items() if k != "ELECTRON_RUN_AS_NODE"}
+    flags = 0
+    if os.name == "nt":
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    try:
+        import subprocess
+
+        subprocess.Popen(
+            [path],
+            cwd=os.path.dirname(path),
+            env=env,
+            creationflags=flags,
+            close_fds=True,
+        )
+        return True
+    except OSError:
+        return False
+
+
+def ensure_dsh_running(exe="", timeout=45.0, stop_ev=None, interval=1.0):
+    """确保 DSH 在跑：桥能连上就直接成功；连不上就拉起 DSH 并等桥就绪。
+
+    返回 (ok, info)。stop_ev 置位时立刻放弃。
+    """
+    ok, info = DshClient().health()
+    if ok:
+        return True, info
+    if stop_ev is not None and stop_ev.is_set():
+        return False, info
+    if not launch_dsh(exe):
+        return False, {"error": "没找到 DSH 程序（可在 config.json 的 dsh_exe_path 里指定位置）"}
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if stop_ev is not None and stop_ev.is_set():
+            return False, {"error": "已取消"}
+        time.sleep(interval)
+        ok, info = DshClient().health()
+        if ok:
+            return True, info
+    return False, {"error": "DSH 启动后桥仍未就绪（等待 %.0fs 超时）" % timeout}
