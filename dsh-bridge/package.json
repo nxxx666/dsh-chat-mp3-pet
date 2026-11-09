@@ -1,6 +1,6 @@
 {
   "name": "dsh-pet-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "把 DSH 的会话接到桌面宠物（桌宠大肥鱼）的本地桥：桌宠说话写进同一个 DSH 会话，DSH 的回复流式推回气泡",
   "type": "module",

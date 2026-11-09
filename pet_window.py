@@ -120,6 +120,7 @@ class DshChatWorker(QThread):
     failed = pyqtSignal(str)
     finished_ok = pyqtSignal(str)
     session_ready = pyqtSignal(str)
+    thinking = pyqtSignal()      # DSH 正在思考（reasoning 阶段）→ 头上冒思考泡
 
     def __init__(self, text: str, session_id: str = "", dsh_exe: str = ""):
         super().__init__()
@@ -182,6 +183,10 @@ class DshChatWorker(QThread):
                     whole.append(ev.text)
                 elif ev.kind == "tool":
                     self.note.emit(ev.text)
+                elif ev.kind == "status":
+                    if ev.text == "thinking":
+                        # DSH 进入思考阶段：桌宠头上冒个「💭 思考中」，正文一来就被盖掉
+                        self.thinking.emit()
                 elif ev.kind == "error":
                     self.failed.emit(ev.text)
 
@@ -209,6 +214,88 @@ class DshChatWorker(QThread):
                     self.client.close()
             except Exception:
                 pass
+
+
+class DshWatchWorker(QThread):
+    """被动监听 DSH 会话：用户在 DSH 桌面版里直接聊时，桌宠也跟着有反应。
+
+    不发话、不建会话，只是挂上 /stream 订阅：
+      - 收到思考帧（reasoning-delta）→ thinking 信号 → 桌宠头上冒「💭 思考中」
+      - 收到正文增量 → answering 信号 → 思考泡收掉（DSH 开始打字了）
+      - 回合结束 / 流断 → 稍等几秒重连；桥没监听（DSH 没开）→ 慢轮询等它回来
+
+    生命周期走 _spawn_worker/_retire_worker 那套保活机制：
+    桌宠自己要说话时会先把它退役（一回合只留一个 worker），聊完再重启。
+    """
+
+    thinking = pyqtSignal()
+    answering = pyqtSignal()
+
+    IDLE_WAIT = 8.0     # 桥没通 / 没会话时的轮询间隔
+    RETRY_WAIT = 3.0    # 流断了之后的重连间隔
+
+    def __init__(self, session_id: str = ""):
+        super().__init__()
+        self.session_id = session_id or ""
+        self._stop_ev = threading.Event()
+        self.client = None
+
+    def stop(self):
+        self._stop_ev.set()
+        try:
+            if self.client is not None:
+                self.client.close()
+        except Exception:
+            pass
+
+    def _pick_session(self, client):
+        """要监听的会话：指定的那个 → 最近的真实会话。绝不新建。"""
+        if self.session_id:
+            return self.session_id
+        for item in client.sessions():
+            sid = item.get("id")
+            if sid and not item.get("blank") and not item.get("origin"):
+                return sid
+        return ""
+
+    def run(self):
+        while not self._stop_ev.is_set():
+            try:
+                self.client = dsh_client.DshClient()
+                client = self.client
+                ok, _ = client.health()
+                sid = self._pick_session(client) if ok else ""
+                if not sid:
+                    # 桥没通（DSH 没开）或还没有会话：慢慢等，别空转
+                    if self._stop_ev.wait(self.IDLE_WAIT):
+                        break
+                    continue
+
+                def on_event(ev):
+                    if self._stop_ev.is_set():
+                        return
+                    if ev.kind == "status":
+                        if ev.text == "thinking":
+                            self.thinking.emit()
+                    elif ev.kind == "delta":
+                        # 正文来了：思考阶段结束，桌宠把思考泡收掉
+                        self.answering.emit()
+
+                # read_timeout：桥有心跳保活，正常时永远不会触发；
+                # 桥死了（DSH 被关掉）35 秒内读超时 → 走重连逻辑
+                client.stream(on_event, self._stop_ev, session_id=sid,
+                              read_timeout=35.0)
+            except Exception:
+                pass
+            finally:
+                try:
+                    if self.client is not None:
+                        self.client.close()
+                except Exception:
+                    pass
+                self.client = None
+            if self._stop_ev.wait(self.RETRY_WAIT):
+                break
 
 
 class SummaryWorker(QThread):
@@ -572,6 +659,9 @@ class PetWindow(QWidget):
         # 等用户真正开口时 DSH 基本已经就绪，不会再看到「连不上」
         if self.ai_mode() == MODE_DSH:
             threading.Thread(target=self._prewarm_dsh, daemon=True).start()
+            # 被动监听：用户在 DSH 桌面版里聊时，桌宠跟着冒思考泡。
+            # 延迟一拍再启动，让预热先跑（监听线程自己也会等桥就绪）
+            QTimer.singleShot(2000, self._start_dsh_watcher)
 
         # 长期记忆：每句话都落一份到 memory.db，提问时按相关度把旧片段捞回来
         self.memory = memory.MemoryStore()
@@ -603,6 +693,7 @@ class PetWindow(QWidget):
         self._music_rescan_timer.timeout.connect(self._auto_rescan_music)
         self._chatting = False   # 聊天推理进行中，此时气泡归聊天所有
         self._interrupted = False  # 这一轮是被「打断」结束的（收尾时加提示）
+        self._watch_think = False  # 监听线程冒的「DSH 思考泡」还挂着没收到
 
         # 应用上次的偏好（音量 / 播放模式 / 窗口位置 / 待机动作）
         self.music.set_volume(self.cfg["volume"])
@@ -1159,6 +1250,7 @@ class PetWindow(QWidget):
             self.bubble.set_text("这个版本没带 DSH 客户端，只能用独立 AI")
             self._music_bubble_timer = 6.0
             return
+        self._stop_dsh_watcher()          # 切模式前把监听线程停干净
         self.cfg["ai_mode"] = mode
         config_store.save(self.cfg)
         if mode == MODE_DSH:
@@ -1167,6 +1259,7 @@ class PetWindow(QWidget):
                 self.bubble.set_text("改用 DSH 会话了：记忆和工具都交给 DSH")
             else:
                 self.bubble.set_text(f"切到 DSH 了，但没连上：{info.get('error') or '桥插件没启动'}")
+            self._start_dsh_watcher()      # 切过来就挂上监听（没桥它自己会等）
         else:
             self.bubble.set_text("改回独立 AI 了")
         self._music_bubble_timer = 7.0
@@ -1269,7 +1362,8 @@ class PetWindow(QWidget):
             trace.log("retire worker 已失效（线程早已结束）")
             return
         trace.log(f"retire worker {type(w).__name__} running={running}")
-        for name in ("chunk", "note", "failed", "finished_ok", "session_ready"):
+        for name in ("chunk", "note", "failed", "finished_ok", "session_ready",
+                     "thinking", "answering"):
             sig = getattr(w, name, None)
             if sig is None:
                 continue
@@ -1327,9 +1421,10 @@ class PetWindow(QWidget):
     # ---------- 聊天 ----------
     def start_chat(self):
         trace.log("start_chat 打开输入框")
-        if self.worker and self.worker.isRunning():
+        if self._chatting and self.worker and self.worker.isRunning():
             # 正在回复时再触发，就掐掉重新问
-            self.set_state("idle")
+            # （监听线程常驻时 worker 也可能是 DshWatchWorker，那种情况别打扰）
+            self.interrupt_chat()
         # DSH 模式不需要桌宠自己的 Key（Key 在 DSH 里配）
         if self.ai_mode() != MODE_DSH and not ai_settings.ensure_ready(self, self.cfg):
             self.bubble.set_text("还没填 API Key，右键 →「AI 设置」填一下就能聊啦")
@@ -1401,6 +1496,7 @@ class PetWindow(QWidget):
         self._pending_reply = ""
         self._chatting = True
         self._interrupted = False
+        self._watch_think = False    # 监听线程冒的思考泡让位给真正的回复
         self._music_bubble_timer = 0.0
 
         self._spawn_worker(DshChatWorker(
@@ -1411,7 +1507,74 @@ class PetWindow(QWidget):
             ("failed", self._on_failed),
             ("finished_ok", self._on_done),
             ("session_ready", self._on_dsh_session),
+            ("thinking", self._on_dsh_thinking),
         ])
+
+    # ---------- 思考泡 & DSH 会话监听 ----------
+
+    def _on_dsh_thinking(self):
+        """桌宠自己发起的这轮：DSH 正在思考 → 把占位的「...」换成思考泡。
+
+        正文增量一来，_on_chunk 就会把状态切到 talking 并盖掉思考泡。
+        """
+        if not self._from_current():
+            return
+        if self._chatting and self.renderer.state == "thinking" and not self._pending_reply:
+            self.bubble.set_text("(💭 思考中…)")
+            self._music_bubble_timer = 0.0
+
+    def _start_dsh_watcher(self):
+        """启动被动监听：用户在 DSH 桌面版里直接聊时，桌宠也跟着冒思考泡。"""
+        if dsh_client is None or self.ai_mode() != MODE_DSH:
+            return
+        if self._chatting:
+            return          # 正在跟桌宠聊，等这轮结束再说
+        try:
+            if self.worker is not None and self.worker.isRunning():
+                return      # 已经有一个监听/聊天线程在跑
+        except RuntimeError:
+            pass
+        trace.log("watcher start")
+        w = DshWatchWorker(self._dsh_session_id)
+        w.finished.connect(self._on_watch_gone)   # 线程收尾时清思考泡
+        self._spawn_worker(w, [
+            ("thinking", self._on_watch_thinking),
+            ("answering", self._on_watch_answering),
+        ])
+
+    def _on_watch_thinking(self):
+        """DSH 桌面版那边进入思考阶段 → 桌宠头上冒思考泡。"""
+        if self._chatting or self.ai_mode() != MODE_DSH:
+            return
+        trace.log("watch: DSH thinking")
+        self.bubble.set_text("(💭 想事情中…)")
+        self.renderer.state = "thinking"
+        self._watch_think = True
+        self._music_bubble_timer = 0.0    # 关掉自动收起，等回合结束再收
+
+    def _on_watch_answering(self):
+        """思考阶段结束（DSH 开始吐正文）→ 思考泡收掉，桌宠回待机。"""
+        if not self._watch_think or self._chatting:
+            return
+        trace.log("watch: DSH answering")
+        self._watch_think = False
+        self.bubble.hide()
+        self.renderer.state = "idle"
+
+    def _stop_dsh_watcher(self):
+        """退出 DSH 模式时把监听线程停掉（不退出程序）。"""
+        w = self.worker
+        if w is not None and isinstance(w, DshWatchWorker):
+            trace.log("watcher stop（切模式）")
+            self._retire_worker()
+
+    def _on_watch_gone(self):
+        """监听线程自然结束（流断了/被退役后收尾）：清掉可能还挂着的思考泡。"""
+        if self._watch_think and not self._chatting:
+            self._watch_think = False
+            self.bubble.hide()
+            if self.renderer.state == "thinking":
+                self.renderer.state = "idle"
 
     def interrupt_chat(self):
         """打断当前回合。
@@ -1555,6 +1718,9 @@ class PetWindow(QWidget):
             # 空回复（模型只给了标点/洗涤后为空）：别让气泡一直挂着
             self.bubble.set_text("(什么都没说…)")
             self._music_bubble_timer = 4.0
+        # DSH 模式：这轮聊完了，把「监听 DSH 桌面版」的线重新挂上
+        if self.ai_mode() == MODE_DSH:
+            QTimer.singleShot(3000, self._start_dsh_watcher)
         trace.log("exit _on_done")
 
     # ---------- 完整回复留档 ----------
@@ -1596,6 +1762,9 @@ class PetWindow(QWidget):
         self.renderer.state = "idle"
         self.bubble.set_text(f"({msg})")
         self._music_bubble_timer = 6.0
+        # DSH 模式：失败了也把监听挂回去（DSH 之后恢复连接时能自动接上）
+        if self.ai_mode() == MODE_DSH:
+            QTimer.singleShot(3000, self._start_dsh_watcher)
         trace.log("exit _on_failed")
 
     def _trim_history(self):

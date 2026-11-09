@@ -208,6 +208,7 @@ class DshClient:
         self.base = f"http://{host}:{port}"
         self.session_id = None
         self._closed = False
+        self._resp = None          # 正在进行的流响应（close 时从别的线程掐断它）
 
     # ---------- 基础 ----------
     def health(self):
@@ -290,10 +291,12 @@ class DshClient:
             return False
 
     # ---------- 流 ----------
-    def stream(self, on_event, stop_flag=None, session_id=None):
+    def stream(self, on_event, stop_flag=None, session_id=None, read_timeout=None):
         """阻塞地读 SSE，把归一化事件喂给 on_event。
 
         stop_flag 是个 threading.Event；置位后尽快退出（桌宠点「停」时用）。
+        read_timeout：单次读的超时秒数。聊天流不传（跟回合走）；
+        被动监听流传 35 秒——桥有心跳保活，正常不触发，桥死了就断线重连。
         返回 True 表示正常收完一轮（收到 turn_end 或流结束）。
         """
         sid = session_id or self.session_id
@@ -304,7 +307,9 @@ class DshClient:
         stop_flag = stop_flag or threading.Event()
         url = f"{self.base}/stream?sessionId={sid}"
         try:
-            with requests.get(url, stream=True, timeout=(TIMEOUT, None)) as resp:
+            resp = requests.get(url, stream=True, timeout=(TIMEOUT, read_timeout))
+            self._resp = resp
+            with resp:
                 if resp.status_code != 200:
                     on_event(StreamEvent("error", f"流打不开（HTTP {resp.status_code}）"))
                     return False
@@ -337,9 +342,21 @@ class DshClient:
             if not stop_flag.is_set() and not self._closed:
                 on_event(StreamEvent("error", f"流断了：{exc}"))
             return False
+        except (AttributeError, OSError):
+            # socket 被另一个线程 close() 掐断时，urllib3 会从读取深处抛
+            # 'NoneType' object has no attribute 'read' 之类的非 requests 异常。
+            # 这是「主动收线」，静默退出即可，别让它击穿调用方。
+            return False
 
     def close(self):
+        """掐断连接。流正阻塞在 iter_lines 里时，关掉底层 socket 能立刻叫醒它
+        （不然要等下一行数据/读超时，退出时会变成「析构运行中的 QThread」）。"""
         self._closed = True
+        try:
+            if self._resp is not None:
+                self._resp.close()
+        except Exception:
+            pass
 
 
 def wait_for_bridge(seconds=8.0, interval=0.5):

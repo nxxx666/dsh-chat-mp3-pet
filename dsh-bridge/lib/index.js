@@ -215,6 +215,13 @@ export function apply(ctx, config = {}) {
       abort.abort()
     })
 
+    // SSE 心跳：每 15s 发一行注释。作用有两个——
+    //   1. 中间层/代理不掐空闲连接；2. 被动监听的桌宠（不发话、只订阅）
+    //      靠这些行检查 stop 标志，不然 stream 会阻塞在 iter_lines 里收不到打断。
+    const keepalive = setInterval(() => {
+      try { res.write(': ping\n\n') } catch { /* 连接已断，忽略 */ }
+    }, 15000)
+
     try {
       const iterator = ctx.sessionController.follow(
         { address: { kind: 'session', sessionId }, assistantStream: true },
@@ -229,6 +236,7 @@ export function apply(ctx, config = {}) {
         try { res.write(`data: ${safeJson({ type: 'bridge/error', error: String(err?.message || err) })}\n\n`) } catch { /* ignore */ }
       }
     } finally {
+      clearInterval(keepalive)
       streams.delete(entry)
       try { res.end() } catch { /* ignore */ }
     }
