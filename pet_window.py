@@ -233,25 +233,71 @@ class DshWatchWorker(QThread):
 
     IDLE_WAIT = 8.0     # 桥没通 / 没会话时的轮询间隔
     RETRY_WAIT = 3.0    # 流断了之后的重连间隔
+    LEAD_WAIT = 2.5     # 盯「最近活跃会话」的间隔
 
     def __init__(self, session_id: str = ""):
         super().__init__()
-        self.session_id = session_id or ""
+        self.session_id = session_id or ""   # config 里记的会话：只当兜底
+        self._target = self.session_id       # 当前实际在监听的会话
+        self._lock = threading.Lock()
         self._stop_ev = threading.Event()
+        self._probe_ev = threading.Event()
         self.client = None
+        self._probe_client = None
 
     def stop(self):
         self._stop_ev.set()
-        try:
-            if self.client is not None:
-                self.client.close()
-        except Exception:
-            pass
+        self._probe_ev.set()
+        for c in (self.client, self._probe_client):
+            try:
+                if c is not None:
+                    c.close()
+            except Exception:
+                pass
 
-    def _pick_session(self, client):
-        """要监听的会话：指定的那个 → 最近的真实会话。绝不新建。"""
-        if self.session_id:
-            return self.session_id
+    def _get_target(self):
+        with self._lock:
+            return self._target
+
+    def _set_target(self, sid):
+        with self._lock:
+            self._target = sid
+
+    def _follow_active(self):
+        """盯桥的 lastSessionId —— 它才是「DSH 界面里最近有动静的那条会话」。
+
+        不盯的话，桌宠永远只监听 config 里记下的旧会话：用户在 DSH 桌面版
+        新开一条对话再聊，被动监听看不见，自然也不会冒思考泡。
+        发现变了就掐断旧流，让主循环立刻重连到新会话。
+        """
+        while not self._probe_ev.wait(self.LEAD_WAIT):
+            if self._stop_ev.is_set():
+                return
+            try:
+                if self._probe_client is None:
+                    self._probe_client = dsh_client.DshClient()
+                ok, info = self._probe_client.health()
+                if not ok:
+                    continue
+                latest = str(info.get("lastSessionId") or "")
+                cur = self._get_target()
+                if not latest or latest == cur:
+                    continue
+                self._set_target(latest)
+                trace.log(f"watch: 跟随活跃会话 {cur[:20] or '-'} -> {latest[:20]}")
+                c = self.client
+                if c is not None:
+                    c.close()
+            except Exception:
+                pass
+
+    def _pick_session(self, client, info=None):
+        """要监听的会话：桥记的最近活跃 → 自己记的 → 最近的真实会话。绝不新建。"""
+        latest = str((info or {}).get("lastSessionId") or "")
+        if latest:
+            return latest
+        if self._get_target():
+            return self._get_target()
         for item in client.sessions():
             sid = item.get("id")
             if sid and not item.get("blank") and not item.get("origin"):
@@ -259,43 +305,54 @@ class DshWatchWorker(QThread):
         return ""
 
     def run(self):
-        while not self._stop_ev.is_set():
-            try:
-                self.client = dsh_client.DshClient()
-                client = self.client
-                ok, _ = client.health()
-                sid = self._pick_session(client) if ok else ""
-                if not sid:
-                    # 桥没通（DSH 没开）或还没有会话：慢慢等，别空转
-                    if self._stop_ev.wait(self.IDLE_WAIT):
-                        break
-                    continue
-
-                def on_event(ev):
-                    if self._stop_ev.is_set():
-                        return
-                    if ev.kind == "status":
-                        if ev.text == "thinking":
-                            self.thinking.emit()
-                    elif ev.kind == "delta":
-                        # 正文来了：思考阶段结束，桌宠把思考泡收掉
-                        self.answering.emit()
-
-                # read_timeout：桥有心跳保活，正常时永远不会触发；
-                # 桥死了（DSH 被关掉）35 秒内读超时 → 走重连逻辑
-                client.stream(on_event, self._stop_ev, session_id=sid,
-                              read_timeout=35.0)
-            except Exception:
-                pass
-            finally:
+        threading.Thread(target=self._follow_active, daemon=True).start()
+        try:
+            while not self._stop_ev.is_set():
+                sid = ""
                 try:
-                    if self.client is not None:
-                        self.client.close()
+                    self.client = dsh_client.DshClient()
+                    client = self.client
+                    ok, info = client.health()
+                    sid = self._pick_session(client, info) if ok else ""
+                    if not sid:
+                        # 桥没通（DSH 没开）或还没有会话：慢慢等，别空转
+                        if self._stop_ev.wait(self.IDLE_WAIT):
+                            break
+                        continue
+                    if sid != self._get_target():
+                        trace.log(f"watch: 监听会话 -> {sid[:20]}")
+                        self._set_target(sid)
+
+                    def on_event(ev):
+                        if self._stop_ev.is_set():
+                            return
+                        if ev.kind == "status":
+                            if ev.text == "thinking":
+                                self.thinking.emit()
+                        elif ev.kind == "delta":
+                            # 正文来了：思考阶段结束，桌宠把思考泡收掉
+                            self.answering.emit()
+
+                    # read_timeout：桥有心跳保活，正常时永远不会触发；
+                    # 桥死了（DSH 被关掉）35 秒内读超时 → 走重连逻辑
+                    client.stream(on_event, self._stop_ev, session_id=sid,
+                                  read_timeout=35.0)
                 except Exception:
                     pass
-                self.client = None
-            if self._stop_ev.wait(self.RETRY_WAIT):
-                break
+                finally:
+                    try:
+                        if self.client is not None:
+                            self.client.close()
+                    except Exception:
+                        pass
+                    self.client = None
+                # 会话被切走了：立刻重连，不用等重试间隔
+                if self._get_target() and self._get_target() != sid:
+                    continue
+                if self._stop_ev.wait(self.RETRY_WAIT):
+                    break
+        finally:
+            self._probe_ev.set()
 
 
 class SummaryWorker(QThread):

@@ -7,7 +7,7 @@
  * 跑法：node test_server.mjs [port]
  */
 import { apply } from './lib/index.js'
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const PORT = Number(process.argv[2] || process.env.PET_TEST_PORT || 47198)
@@ -23,8 +23,34 @@ const CANCEL_LOG = fileURLToPath(new URL('./_test_cancel.json', import.meta.url)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const SESSION_ID = 'sess-pet-test'
+// 测试「跟随会话切换」用：往这个文件写 {"sessionId":"xxx"} 就相当于
+// 用户在 DSH 界面里切到那条会话（插件据此更新 lastSessionId）
+const SWITCH_FILE = fileURLToPath(new URL('./_test_switch.json', import.meta.url))
+// 监听这个会话的流永远是静默的（模拟「桌宠死盯旧会话、看不到新对话」）
+const QUIET_SESSION = 'sess-quiet'
 let cancelled = false
 let prompted = false
+
+// 真实的 ctx.on 能收插件注册的回调，这里也实现一个：切会话时触发 session/event
+const listeners = new Map()
+const mockOn = (name, cb) => {
+  if (!listeners.has(name)) listeners.set(name, [])
+  listeners.get(name).push(cb)
+  return () => {}
+}
+let seenSwitch = ''
+setInterval(() => {
+  try {
+    const data = JSON.parse(readFileSync(SWITCH_FILE, 'utf8'))
+    const sid = String(data.sessionId || '')
+    if (sid && sid !== seenSwitch) {
+      seenSwitch = sid
+      for (const cb of listeners.get('session/event') || []) {
+        cb({ id: sid }, { type: 'test/session-switch' })
+      }
+    }
+  } catch { /* 文件不存在就跳过 */ }
+}, 300)
 
 function logCancel(sessionId) {
   cancelled = true
@@ -36,7 +62,7 @@ function logCancel(sessionId) {
 }
 
 const mockCtx = {
-  on() { return () => {} },
+  on: mockOn,
   effect(fn) { fn() },
   sessionController: {
     async list() {
@@ -58,15 +84,21 @@ const mockCtx = {
       logCancel(req?.sessionId || SESSION_ID)
       return { accepted: true }
     },
-    async *follow() {
+    async *follow(req) {
+      const sid = req?.address?.sessionId || SESSION_ID
       // 1. 开场快照
       yield {
         type: 'snapshot',
-        header: { version: 1, id: SESSION_ID, createdAt: Date.now(), isSeeded: false },
+        header: { version: 1, id: sid, createdAt: Date.now(), isSeeded: false },
         cursor: 0,
         records: [],
         hasMore: false,
         projections: {},
+      }
+      // 静默会话：只有快照，之后一直挂着（模拟「这条会话没人在聊」）
+      if (sid === QUIET_SESSION) {
+        while (!cancelled) await sleep(100)
+        return
       }
       // 2. 非自由推轮模式下：等真有人发话再推帧（保证聊天类测试时序确定）
       if (!FREE_TURN) {

@@ -8,12 +8,14 @@
  */
 import assert from 'node:assert'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const PORT = 47199
 const BASE = `http://127.0.0.1:${PORT}`
-const STATUS_FILE = path.join(os.homedir(), '.dsh', 'pet-bridge.json')
+// 千万别用 ~/.dsh/pet-bridge.json：那是真实 DSH 的状态文件，
+// 测试拿它落盘会把桌宠的端口发现改坏（曾经踩过：测试后桌宠连到假桥，health 全红）
+const STATUS_FILE = fileURLToPath(new URL('./_test_bridge_status.json', import.meta.url))
 
 let ok = 0
 let fail = 0
@@ -73,7 +75,7 @@ check('插件导出了 name / inject / apply',
   mod.name === 'pet-bridge' && Array.isArray(mod.inject) && typeof mod.apply === 'function',
   `name=${mod.name} inject=${JSON.stringify(mod.inject)}`)
 
-mod.apply(mockCtx, { port: PORT })
+mod.apply(mockCtx, { port: PORT, statusFile: STATUS_FILE })
 await new Promise((r) => setTimeout(r, 400))
 
 async function getJson(p, init) {
