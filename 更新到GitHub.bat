@@ -1,45 +1,44 @@
 @echo off
-chcp 65001 >nul
 cd /d "%~dp0"
 set GITURL=https://github.com/nxxx666/dsh-chat-mp3-pet
 
 echo ============================================
-echo  1/3  检查本地改动
+echo  1/3  ��鱾�ظĶ�
 echo ============================================
 git status --short
 echo.
 
 echo ============================================
-echo  2/3  提交
+echo  2/3  �ύ
 echo ============================================
 set "MSG="
-set /p MSG=请输入本次更新说明（直接回车用默认）: 
-if "%MSG%"=="" set "MSG=更新桌宠功能"
+set /p MSG=�����뱾�θ���˵����ֱ�ӻس���Ĭ�ϣ�: 
+if "%MSG%"=="" set "MSG=�������蹦��"
 git add -A
 git commit -m "%MSG%"
-if errorlevel 1 echo [提示] 没有新改动需要提交，直接推送已有提交。
+if errorlevel 1 echo [��ʾ] û���¸Ķ���Ҫ�ύ��ֱ�����������ύ��
 
 echo.
 echo ============================================
-echo  3/3  推送到 GitHub
+echo  3/3  ���͵� GitHub
 echo ============================================
 git push origin main
 if errorlevel 1 (
     echo.
-    echo [失败] 推送没成功。常见原因：
-    echo   1. 网络/代理不通 —— 关掉代理或换个网络再试
-    echo   2. 没登录 —— 打开 GitHub Desktop 登录一次，或在弹窗里登录
-    echo   3. 仓库还没建 —— 先去 %GITURL% 建好空仓库
+    echo [ʧ��] ����û�ɹ�������ԭ��
+    echo   1. ����/������ͨ ���� �ص������򻻸���������
+    echo   2. û��¼ ���� �� GitHub Desktop ��¼һ�Σ����ڵ������¼
+    echo   3. �ֿ⻹û�� ���� ��ȥ %GITURL% ���ÿղֿ�
     echo.
     pause
     exit /b 1
 )
 
 echo.
-echo [成功] 代码已同步到 GitHub。
+echo [�ɹ�] ������ͬ���� GitHub��
 echo.
-echo 如果这次也改了程序本身，还需要更新 Release 压缩包：
-echo   1. 双击「打包Release.bat」生成新 zip
-echo   2. 打开 Release 页面，编辑最新版本，替换那个 zip 资产
+echo ������Ҳ���˳�����������Ҫ���� Release ѹ������
+echo   1. ˫�������Release.bat�������� zip
+echo   2. �� Release ҳ�棬�༭���°汾���滻�Ǹ� zip �ʲ�
 start "" "%GITURL%/releases"
 pause

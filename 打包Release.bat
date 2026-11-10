@@ -1,5 +1,4 @@
 @echo off
-chcp 65001 >nul
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
@@ -10,22 +9,22 @@ if "%PY%"=="" (
     if !errorlevel!==0 set "PY=python"
 )
 if "%PY%"=="" (
-    echo [ERROR] æ²¡æ‰¾åˆ° Pythonï¼Œè¯·å…ˆè£… Python 3.10+ï¼ˆæˆ–æ”¹æˆæœ¬æœº python.exe çš„è·¯å¾„ï¼‰
+    echo [ERROR] Ã»ÕÒµ½ Python£¬ÇëÏÈ×° Python 3.10+£¨»ò¸Ä³É±¾»ú python.exe µÄÂ·¾¶£©
     pause
     exit /b 1
 )
-echo ä½¿ç”¨ Python: %PY%
+echo Ê¹ÓÃ Python: %PY%
 "%PY%" -c "import PyQt6, live2d, PyInstaller" 2>nul
 if errorlevel 1 (
-    echo [ERROR] ç¼ºä¾èµ–ï¼Œå…ˆæ‰§è¡Œï¼š "%PY%" -m pip install -i https://mirrors.aliyun.com/pypi/simple PyQt6 live2d-py pyinstaller
+    echo [ERROR] È±ÒÀÀµ£¬ÏÈÖ´ĞĞ£º "%PY%" -m pip install -i https://mirrors.aliyun.com/pypi/simple PyQt6 live2d-py pyinstaller
     pause
     exit /b 1
 )
 
 echo.
-echo === æ‰“åŒ…ä¸­ï¼ˆ1-3 åˆ†é’Ÿï¼Œåˆ«å…³çª—å£ï¼‰===
+echo === ´ò°üÖĞ£¨1-3 ·ÖÖÓ£¬±ğ¹Ø´°¿Ú£©===
 "%PY%" -m PyInstaller --noconfirm --noconsole --onedir ^
-  --name "æ¡Œå® å¤§è‚¥é±¼" ^
+  --name "×À³è´ó·ÊÓã" ^
   --distpath dist ^
   --workpath build ^
   --specpath . ^
@@ -43,26 +42,26 @@ echo === æ‰“åŒ…ä¸­ï¼ˆ1-3 åˆ†é’Ÿï¼Œåˆ«å…³çª—å£ï¼‰===
   --exclude-module mkl ^
   setup_and_run.py
 if errorlevel 1 (
-    echo [ERROR] æ‰“åŒ…å¤±è´¥ï¼Œçœ‹ä¸Šé¢æŠ¥é”™
+    echo [ERROR] ´ò°üÊ§°Ü£¬¿´ÉÏÃæ±¨´í
     pause
     exit /b 1
 )
 
-copy /y "ä½¿ç”¨è¯´æ˜.txt" "dist\æ¡Œå® å¤§è‚¥é±¼\ä½¿ç”¨è¯´æ˜.txt" >nul 2>nul
-del /q "dist\æ¡Œå® å¤§è‚¥é±¼\memory.db" >nul 2>nul
-del /q "dist\æ¡Œå® å¤§è‚¥é±¼\_trace.log" >nul 2>nul
+copy /y "Ê¹ÓÃËµÃ÷.txt" "dist\×À³è´ó·ÊÓã\Ê¹ÓÃËµÃ÷.txt" >nul 2>nul
+del /q "dist\×À³è´ó·ÊÓã\memory.db" >nul 2>nul
+del /q "dist\×À³è´ó·ÊÓã\_trace.log" >nul 2>nul
 
 echo.
-echo === ç”Ÿæˆ Release å‹ç¼©åŒ… ===
-"%PY%" "tools\make_release_zip.py" "dist\æ¡Œå® å¤§è‚¥é±¼"
+echo === Éú³É Release Ñ¹Ëõ°ü ===
+"%PY%" "tools\make_release_zip.py" "dist\×À³è´ó·ÊÓã"
 if errorlevel 1 (
-    echo [ERROR] å‹ç¼©åŒ…ç”Ÿæˆå¤±è´¥
+    echo [ERROR] Ñ¹Ëõ°üÉú³ÉÊ§°Ü
     pause
     exit /b 1
 )
 
 echo.
-echo å®Œæˆã€‚æŠŠæ¡Œé¢ä¸Šé‚£ä¸ª æ¡Œå® å¤§è‚¥é±¼-windows-x64-*.zip ä¼ åˆ° Release å³å¯ã€‚
-echo æƒ³å…ˆæœ¬åœ°è¯•è·‘ï¼šdist\æ¡Œå® å¤§è‚¥é±¼\æ¡Œå® å¤§è‚¥é±¼.exe
-start "" "dist\æ¡Œå® å¤§è‚¥é±¼"
+echo Íê³É¡£°Ñ×ÀÃæÉÏÄÇ¸ö ×À³è´ó·ÊÓã-windows-x64-*.zip ´«µ½ Release ¼´¿É¡£
+echo ÏëÏÈ±¾µØÊÔÅÜ£ºdist\×À³è´ó·ÊÓã\×À³è´ó·ÊÓã.exe
+start "" "dist\×À³è´ó·ÊÓã"
 pause

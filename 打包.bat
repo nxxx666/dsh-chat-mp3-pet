@@ -1,3 +1,3 @@
 @echo off
-rem å…¼å®¹æ—§åå­—ï¼šçœŸæ­£çš„æ‰“åŒ…é€»è¾‘åœ¨ æ‰“åŒ…Release.bat
-call "%~dp0æ‰“åŒ…Release.bat"
+rem ¼æÈİ¾ÉÃû×Ö£ºÕæÕıµÄ´ò°üÂß¼­ÔÚ ´ò°üRelease.bat
+call "%~dp0´ò°üRelease.bat"
