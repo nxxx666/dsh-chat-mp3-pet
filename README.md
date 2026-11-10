@@ -118,8 +118,38 @@ python tests/test_watchdog.py    # 卡死看门狗
 
 ```bash
 pip install pyinstaller
-打包.bat        # 生成 dist\桌宠大肥鱼\，依赖 music_player 的 Windows 音频后端设置
+打包Release.bat   # PyInstaller 出 dist\桌宠大肥鱼\，并自动生成 Release 压缩包
 ```
+
+> 注意：`--specpath` 会改变 `--add-data` 相对路径的解析基准，所以 spec 必须放在
+> 仓库根目录（`--specpath .`），否则会报 `Unable to find ...assets`。
+
+## 发布新版本（维护者）
+
+改完代码后两件事：
+
+**1. 更新代码**
+
+双击 `更新到GitHub.bat`（输入一句更新说明即可），或者手动：
+
+```bash
+git add -A
+git commit -m "这次改了什么"
+git push origin main
+```
+
+**2. 更新 Release 压缩包**（只在改了程序逻辑、界面或立绘时需要）
+
+1. 双击 `打包Release.bat`：打包 → 桌面生成 `桌宠大肥鱼-windows-x64.zip`
+2. GitHub → Releases → 编辑最新那个 Release → 删掉旧 zip → 上传新 zip
+3. **资产名保持 `桌宠大肥鱼-windows-x64.zip` 不变**，README 里的下载链接才不会失效
+
+脚本会自动做三件事，不用手动检查：
+
+- 用 `config.example.json` 覆盖 `config.json`，保证 `ai_api_key` 为空
+- 剔除所有 `*.mp3`（版权音乐）、`memory.db`（个人记忆）、`*.log`（运行日志）
+- 桌面上同名旧包改名为 `桌宠大肥鱼-windows-x64-<日期>.zip` 归档，不覆盖、不删除
+
 
 ## 常见问题
 

@@ -21,3 +21,6 @@ music/*
 *.png.tmp
 .DS_Store
 Thumbs.db
+
+# PyInstaller 生成的 spec 是构建副产物
+*.spec
