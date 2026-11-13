@@ -402,6 +402,8 @@ class Bubble(QWidget):
     """
 
     size_changed = pyqtSignal()      # 尺寸变了，外层要重新摆位
+    closed_by_user = pyqtSignal()    # 用户点击气泡主动关闭
+    hover_changed = pyqtSignal(bool) # 鼠标悬停/离开（外层暂停自动收起计时）
 
     def __init__(self):
         super().__init__(
@@ -409,8 +411,10 @@ class Bubble(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
-            | Qt.WindowType.WindowTransparentForInput,
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
         )
+        # 不再鼠标穿透：气泡要能接收点击（点击关闭）和悬停（暂停收起）。
+        # WS_EX_NOACTIVATE（WindowDoesNotAcceptFocus）保证点击不抢输入焦点。
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.text = ""
@@ -420,8 +424,23 @@ class Bubble(QWidget):
 
         self.pages = []             # 多页内容（空 = 单页模式）
         self.page_index = 0
+        self.hovering = False       # 鼠标悬停中（外层暂停自动收起）
         self._page_timer = QTimer(self)
         self._page_timer.timeout.connect(self._next_page)
+
+    # ---------- 交互 ----------
+    def mousePressEvent(self, _):
+        # 点击气泡任意位置 = 主动关闭（窗口不抢焦点，点完焦点留在原处）
+        self.closed_by_user.emit()
+        self.hide()
+
+    def enterEvent(self, _):
+        self.hovering = True
+        self.hover_changed.emit(True)
+
+    def leaveEvent(self, _):
+        self.hovering = False
+        self.hover_changed.emit(False)
 
     # ---------- 对外 ----------
     def set_text(self, text: str):
@@ -684,6 +703,14 @@ class Bubble(QWidget):
                 f"{self.page_index + 1} / {len(self.pages)}",
             )
 
+        # 右上角小 ×：提示气泡可以点击关闭
+        fx = QFont(self.font)
+        fx.setPointSize(max(7, self.font.pointSize() - 2))
+        p.setFont(fx)
+        p.setPen(QColor(150, 158, 170, 170))
+        p.drawText(r.adjusted(-self._pad, 2, 2, 0),
+                   int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop), "×")
+
     def hideEvent(self, e):
         self._stop_paging()
         super().hideEvent(e)
@@ -717,6 +744,7 @@ class PetWindow(QWidget):
         self._cli_host = host
         self.bubble = Bubble()
         self.bubble.size_changed.connect(self._position_bubble)
+        self.bubble.closed_by_user.connect(self._on_bubble_closed)
         self._placing = False        # 摆位重入保护
         self._bubble_ready = True    # moveEvent 里判断 bubble 是否已建好
         self.persona_name = persona.active_name() or "大肥鱼"
@@ -935,9 +963,12 @@ class PetWindow(QWidget):
         if self.renderer.blink > 0:
             self.renderer.blink = max(0.0, self.renderer.blink - dt * 7)
 
-        # 歌名气泡倒计时：到点收起，并把角色恢复成待机
+        # 气泡倒计时：到点收起，并把角色恢复成待机。
+        # 递减速度减半 = 所有气泡显示时长整体翻倍（反馈「消失太快」）；
+        # 鼠标悬停在气泡上时完全暂停，看完想多久都行；点击气泡可随时手动关掉。
         if self._music_bubble_timer > 0:
-            self._music_bubble_timer -= dt
+            if not getattr(self.bubble, "hovering", False):
+                self._music_bubble_timer -= dt * 0.5
             if self._music_bubble_timer <= 0 and not self._chatting:
                 self.bubble.hide()
                 if self.renderer.state == "talking":
@@ -1015,6 +1046,12 @@ class PetWindow(QWidget):
         b.set_tail_side(tail, quiet=True)
         if (b.x(), b.y()) != (bx, by):
             b.move(bx, by)
+
+    def _on_bubble_closed(self):
+        """用户点击气泡主动关闭：清掉倒计时，角色回待机。"""
+        self._music_bubble_timer = 0.0
+        if self.renderer.state == "talking" and not self._chatting:
+            self.renderer.state = "idle"
 
     def moveEvent(self, e):
         super().moveEvent(e)
@@ -1804,12 +1841,14 @@ class PetWindow(QWidget):
             pages = self.bubble.paginate(clean_text)
             if len(pages) > 1:
                 self.bubble.set_pages(pages)
-                # 气泡停留时间 = 各页阅读时长之和 + 5 秒余量，别没翻完就收起来
+                # 气泡停留时间 = 各页阅读时长之和 + 余量，别没翻完就收起来
+                # （_tick 里递减速度已减半，实际停留约为这些数字的两倍；
+                #   悬停气泡暂停计时，点击气泡随时手动关闭）
                 read_time = sum(Bubble._page_delay(p) for p in pages) / 1000.0
-                self._music_bubble_timer = read_time + 5.0
+                self._music_bubble_timer = read_time + 8.0
             else:
                 self.bubble.set_text(clean_text)
-                self._music_bubble_timer = 8.0
+                self._music_bubble_timer = 12.0
             self.history.append({"role": "assistant", "content": clean_text})
             # DSH 模式下记忆由 DSH 的记忆插件负责，桌宠这边不重复存一份
             if self._memory_on() and self.ai_mode() != MODE_DSH:
