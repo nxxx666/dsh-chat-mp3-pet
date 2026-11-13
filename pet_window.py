@@ -492,10 +492,15 @@ class Bubble(QWidget):
             pages.append(cur)
         return pages or [text]
 
-    def set_tail_side(self, side: str):
+    def set_tail_side(self, side: str, quiet: bool = False):
+        """切换尾巴方向。
+
+        quiet=True 时不发 size_changed —— 由摆位逻辑（_place_bubble）调用时用，
+        否则「改方向 -> resize -> emit -> 重入摆位」会形成同步递归。
+        """
         if side != self.tail_side:
             self.tail_side = side
-            self._resize_to_fit()
+            self._resize_to_fit(quiet=quiet)
 
     # ---------- 分页内部 ----------
     @staticmethod
@@ -570,10 +575,10 @@ class Bubble(QWidget):
             return self.text
         return self._clip_to_page(self.text)
 
-    def _resize_to_fit(self):
+    def _measure_body(self):
+        """当前显示文字的正文尺寸（不含尾巴）。"""
         fm = QFontMetrics(self.font)
         shown = self._display_text()
-        # 先按「水平方向可用宽度」量一次文字高度
         avail_w = BUBBLE_MAX_W - self._pad * 2
         rect = fm.boundingRect(
             0, 0, avail_w, 100000,
@@ -584,15 +589,28 @@ class Bubble(QWidget):
         h = rect.height() + self._pad * 2 + 4
         if len(self.pages) > 1:
             h += 18          # 右下角页码占位
-        # 尾巴占哪一边，就给哪一边留空间（与 paintEvent 完全一致）
-        if self.tail_side in ("bottom", "top"):
+        return w, h
+
+    def size_for_side(self, side: str):
+        """尾巴方向为 side 时的整窗尺寸（只算不 resize）。
+
+        摆位逻辑判定「某个方向放不放得下」必须用该方向的尺寸——
+        切换方向会改宽/高（差一个 TAIL），用错尺寸的判定不自洽，
+        在屏幕边缘会来回翻转，引发重入递归直至崩溃。
+        """
+        w, h = self._measure_body()
+        if side in ("bottom", "top"):
             h += TAIL
         else:
             w += TAIL
-        new_size = (max(80, w), max(40, h))
+        return max(80, w), max(40, h)
+
+    def _resize_to_fit(self, quiet: bool = False):
+        new_size = self.size_for_side(self.tail_side)
         if new_size != (self.width(), self.height()):
             self.resize(*new_size)
-            self.size_changed.emit()
+            if not quiet:
+                self.size_changed.emit()
 
     def _body_rect(self) -> QRectF:
         w, h = self.width(), self.height()
@@ -699,6 +717,8 @@ class PetWindow(QWidget):
         self._cli_host = host
         self.bubble = Bubble()
         self.bubble.size_changed.connect(self._position_bubble)
+        self._placing = False        # 摆位重入保护
+        self._bubble_ready = True    # moveEvent 里判断 bubble 是否已建好
         self.persona_name = persona.active_name() or "大肥鱼"
         self.persona_text = persona.load(self.persona_name)
         self.setWindowTitle(self.persona_name)
@@ -931,49 +951,76 @@ class PetWindow(QWidget):
     def _position_bubble(self):
         """把气泡摆到不与桌宠重叠的位置。
 
-        切换尾巴方向会改变气泡尺寸（差一个 TAIL），所以要走两趟：
-        第一趟定方向，第二趟用最终尺寸定坐标。
+        _placing 防重入：摆位过程中 set_tail_side -> resize 若再触发
+        size_changed 直接连回本函数，会形成同步递归（角落 + 长句时
+        判定临界翻转 -> 无限重入 -> 栈溢出崩溃）。
         """
-        if not self.bubble.isVisible():
+        if not self.bubble.isVisible() or getattr(self, "_placing", False):
             return
-        self._place_bubble()
-        self._place_bubble()
+        self._placing = True
+        try:
+            self._place_bubble()
+        finally:
+            self._placing = False
 
     def _place_bubble(self):
+        """摆位 + 选尾巴方向。判定一律用 size_for_side（方向相关的尺寸）。"""
         b = self.bubble
         scr = QApplication.primaryScreen().availableGeometry()
-        bw, bh = b.width(), b.height()
         gap = 2                     # 尾巴长度 + 一点空隙，视觉上指向桌宠
         px, py = self.x(), self.y()
         pw, ph = self.width(), self.height()
 
-        side = "bottom"
-        bx = px + (pw - bw) // 2
-        by = py - bh - gap
+        # 尾巴方向语义（与 paintEvent 一致）：
+        #   tail="bottom" 气泡在桌宠上方，尾巴在下缘指下
+        #   tail="left"   尾巴在气泡左缘（指向左）→ 气泡在桌宠右侧
+        #   tail="right"  尾巴在气泡右缘（指向右）→ 气泡在桌宠左侧
+        def fits(tail):
+            w, h = b.size_for_side(tail)
+            if tail == "bottom":
+                return py - h - gap >= scr.top() + 2
+            if tail == "left":                      # 气泡放桌宠右侧
+                return px + pw + gap + w <= scr.right() - 2
+            return px - w - gap >= scr.left() + 2   # tail="right"，气泡放左侧
 
-        if by < scr.top():
-            # 上方空间不够 -> 左侧
-            if px - bw - gap >= scr.left():
-                side = "right"
-                bx = px - bw - gap
-                by = py + ph - bh
-            # 右侧
-            elif px + pw + gap + bw <= scr.right():
-                side = "left"
-                bx = px + pw + gap
-                by = py + ph - bh
-            else:
-                # 都不行：贴顶部，允许压在桌宠上
-                by = scr.top() + 2
+        tail = "bottom"
+        if not fits("bottom"):
+            # 上方放不下：先看当前方向（粘滞：流式输出时别左右乱跳），再左、右
+            cur = b.tail_side
+            if cur in ("left", "right") and fits(cur):
+                tail = cur
+            elif fits("left"):
+                tail = "left"
+            elif fits("right"):
+                tail = "right"
+            # 都不行：贴屏幕顶，允许压在桌宠上（tail 保持 bottom）
+
+        w, h = b.size_for_side(tail)
+        if tail == "bottom":
+            bx = px + (pw - w) // 2
+            by = py - h - gap
+        elif tail == "left":
+            bx = px + pw + gap
+            by = py + ph - h
+        else:
+            bx = px - w - gap
+            by = py + ph - h
 
         # 夹到屏幕内，避免文字被屏幕边缘切掉
-        bx = max(scr.left() + 2, min(bx, scr.right() - bw - 2))
-        by = max(scr.top() + 2, min(by, scr.bottom() - bh - 2))
+        bx = max(scr.left() + 2, min(bx, scr.right() - w - 2))
+        by = max(scr.top() + 2, min(by, scr.bottom() - h - 2))
 
-        b.set_tail_side("right" if side == "left" else
-                        ("left" if side == "right" else "bottom"))
+        # quiet=True：方向变化引发的 resize 不再 emit，
+        # 尺寸已用 size_for_side 预测好，坐标与实际一致，无需再触发一轮摆位
+        b.set_tail_side(tail, quiet=True)
         if (b.x(), b.y()) != (bx, by):
             b.move(bx, by)
+
+    def moveEvent(self, e):
+        super().moveEvent(e)
+        # 拖动/挪动桌宠时气泡跟着重摆，别留在原地指向空气
+        if getattr(self, "_bubble_ready", False):
+            self._position_bubble()
 
     def paintEvent(self, _):
         if self.live2d_mode:
