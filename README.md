@@ -25,7 +25,8 @@ DSH 在干活，她在桌面上汇报。
 
 ### 方式一：下载即用（推荐，不需要装 Python）
 
-1. 到本仓库的 **[Releases](../../releases)** 页面下载最新 `桌宠大肥鱼-windows-x64.zip`（约 70MB）
+1. 到本仓库的 **[Releases](../../releases)** 页面，在最新 Release 的 Assets 里下载
+   `桌宠大肥鱼-windows-x64-<版本号>.zip`（约 70MB，版本号最大的就是最新）
 2. 解压到任意目录（**请解压整个文件夹**，exe 依赖旁边的 `_internal`，单独拷 exe 无法运行）
 3. 双击 `桌宠大肥鱼.exe`
 4. 首次启动会弹出「AI 设置」窗口 → 填你自己的 DeepSeek API Key →「测试连接」→ 保存
@@ -172,15 +173,18 @@ git push origin main
 
 **2. 更新 Release 压缩包**（只在改了程序逻辑、界面或立绘时需要）
 
-1. 双击 `打包Release.bat`：打包 → 桌面生成 `桌宠大肥鱼-windows-x64.zip`
-2. GitHub → Releases → 编辑最新那个 Release → 删掉旧 zip → 上传新 zip
-3. **资产名保持 `桌宠大肥鱼-windows-x64.zip` 不变**，README 里的下载链接才不会失效
+1. 双击 `打包Release.bat`：打包 → 桌面生成 `桌宠大肥鱼-windows-x64-<版本号>.zip`
+2. GitHub → Releases → **Draft a new release**，Tag 填同一个版本号（如 `0.0.3`）→ 上传这个 zip
+3. 以后每次打包版本号自动 +1（`0.0.0` → `0.0.1` → `0.0.2` …），各版本互不覆盖，
+   用户能在 Releases 页面挑着下，出问题也好回滚
 
 脚本会自动做三件事，不用手动检查：
 
 - 用 `config.example.json` 覆盖 `config.json`，保证 `ai_api_key` 为空
 - 剔除所有 `*.mp3`（版权音乐）、`memory.db`（个人记忆）、`*.log`（运行日志）
-- 桌面上同名旧包改名为 `桌宠大肥鱼-windows-x64-<日期>.zip` 归档，不覆盖、不删除
+- 版本号取桌面上已有 `桌宠大肥鱼-windows-x64-x.y.z.zip` 的最大值再 +1；一个都没有就从
+  `0.0.0` 开始。想指定版本号可以手动跑：
+  `python tools/make_release_zip.py dist\桌宠大肥鱼 "" 0.1.0`
 
 
 ## 常见问题
