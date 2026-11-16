@@ -121,6 +121,8 @@ class DshChatWorker(QThread):
     finished_ok = pyqtSignal(str)
     session_ready = pyqtSignal(str)
     thinking = pyqtSignal()      # DSH 正在思考（reasoning 阶段）→ 头上冒思考泡
+    approval = pyqtSignal(object)     # 要用户确认的敏感操作（dict：id/toolName/reason）
+    approval_closed = pyqtSignal(str, str)  # (id, outcome) 审批已有结果/作废
 
     def __init__(self, text: str, session_id: str = "", dsh_exe: str = ""):
         super().__init__()
@@ -187,6 +189,13 @@ class DshChatWorker(QThread):
                     if ev.text == "thinking":
                         # DSH 进入思考阶段：桌宠头上冒个「💭 思考中」，正文一来就被盖掉
                         self.thinking.emit()
+                elif ev.kind == "approval":
+                    # 敏感操作要用户确认：桥把请求转过来（界面不在场时才会走到这）
+                    self.approval.emit(ev.raw or {})
+                elif ev.kind == "approval_done":
+                    self.approval_closed.emit(ev.text, str((ev.raw or {}).get("outcome") or ""))
+                elif ev.kind == "approval_cancel":
+                    self.approval_closed.emit(ev.text, "cancel")
                 elif ev.kind == "error":
                     self.failed.emit(ev.text)
 
@@ -230,6 +239,8 @@ class DshWatchWorker(QThread):
 
     thinking = pyqtSignal()
     answering = pyqtSignal()
+    approval = pyqtSignal(object)           # 要用户确认的敏感操作
+    approval_closed = pyqtSignal(str, str)  # (id, outcome)
 
     IDLE_WAIT = 8.0     # 桥没通 / 没会话时的轮询间隔
     RETRY_WAIT = 3.0    # 流断了之后的重连间隔
@@ -332,6 +343,14 @@ class DshWatchWorker(QThread):
                         elif ev.kind == "delta":
                             # 正文来了：思考阶段结束，桌宠把思考泡收掉
                             self.answering.emit()
+                        elif ev.kind == "approval":
+                            # 界面里没开这条会话时，桥会把权限确认转给桌宠
+                            self.approval.emit(ev.raw or {})
+                        elif ev.kind == "approval_done":
+                            self.approval_closed.emit(
+                                ev.text, str((ev.raw or {}).get("outcome") or ""))
+                        elif ev.kind == "approval_cancel":
+                            self.approval_closed.emit(ev.text, "cancel")
 
                     # read_timeout：桥有心跳保活，正常时永远不会触发；
                     # 桥死了（DSH 被关掉）35 秒内读超时 → 走重连逻辑
@@ -353,6 +372,30 @@ class DshWatchWorker(QThread):
                     break
         finally:
             self._probe_ev.set()
+
+
+class ApprovalAnswerWorker(QThread):
+    """把「允许一次 / 拒绝」发回桥插件。
+
+    HTTP 是同步的，放线程里发，别卡住界面（气泡要能马上给出反馈）。
+    """
+
+    done = pyqtSignal(str, bool, str)   # (request_id, allow, error)
+
+    def __init__(self, request_id: str, allow: bool):
+        super().__init__()
+        self.request_id = request_id
+        self.allow = allow
+
+    def run(self):
+        try:
+            if dsh_client is None:
+                self.done.emit(self.request_id, self.allow, "DSH 模块没加载")
+                return
+            ok, err = dsh_client.DshClient().approve(self.request_id, self.allow)
+        except Exception as exc:
+            ok, err = False, str(exc)
+        self.done.emit(self.request_id, self.allow, "" if ok else err)
 
 
 class SummaryWorker(QThread):
@@ -404,6 +447,11 @@ class Bubble(QWidget):
     size_changed = pyqtSignal()      # 尺寸变了，外层要重新摆位
     closed_by_user = pyqtSignal()    # 用户点击气泡主动关闭
     hover_changed = pyqtSignal(bool) # 鼠标悬停/离开（外层暂停自动收起计时）
+    answered = pyqtSignal(bool)      # 确认模式：True=允许一次，False=拒绝
+
+    BTN_W = 88
+    BTN_H = 30
+    BTN_GAP = 8
 
     def __init__(self):
         super().__init__(
@@ -425,14 +473,39 @@ class Bubble(QWidget):
         self.pages = []             # 多页内容（空 = 单页模式）
         self.page_index = 0
         self.hovering = False       # 鼠标悬停中（外层暂停自动收起）
+        self.ask_id = ""            # 非空 = 确认模式：等用户点「允许/拒绝」
+        self._btn_allow = QRectF()
+        self._btn_deny = QRectF()
+        self._hover_btn = ""        # 鼠标压在哪个按钮上（用于高亮）
         self._page_timer = QTimer(self)
         self._page_timer.timeout.connect(self._next_page)
 
     # ---------- 交互 ----------
-    def mousePressEvent(self, _):
+    def mousePressEvent(self, e):
+        if self.ask_id:
+            pos = e.position() if hasattr(e, "position") else e.pos()
+            if self._btn_allow.contains(pos):
+                self.answered.emit(True)
+                return
+            if self._btn_deny.contains(pos):
+                self.answered.emit(False)
+                return
+            # 确认模式下点空白处不关：误关会让 DSH 那轮一直等下去
+            return
         # 点击气泡任意位置 = 主动关闭（窗口不抢焦点，点完焦点留在原处）
         self.closed_by_user.emit()
         self.hide()
+
+    def mouseMoveEvent(self, e):
+        if not self.ask_id:
+            return super().mouseMoveEvent(e)
+        pos = e.position() if hasattr(e, "position") else e.pos()
+        now = "allow" if self._btn_allow.contains(pos) else (
+            "deny" if self._btn_deny.contains(pos) else "")
+        if now != self._hover_btn:
+            self._hover_btn = now
+            self.setCursor(Qt.CursorShape.PointingHandCursor if now else Qt.CursorShape.ArrowCursor)
+            self.update()
 
     def enterEvent(self, _):
         self.hovering = True
@@ -440,6 +513,10 @@ class Bubble(QWidget):
 
     def leaveEvent(self, _):
         self.hovering = False
+        if self.ask_id and self._hover_btn:
+            self._hover_btn = ""
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.update()
         self.hover_changed.emit(False)
 
     # ---------- 对外 ----------
@@ -472,6 +549,33 @@ class Bubble(QWidget):
 
     def clear_paging(self):
         self._stop_paging()
+
+    def show_ask(self, request_id: str, text: str):
+        """确认模式：显示提示 + 底部「拒绝 / 允许一次」两个按钮。
+
+        DSH 里有敏感操作（越权执行）时会走这条路：由用户在桌宠上直接点。
+        """
+        self._stop_paging()
+        self.ask_id = request_id
+        self.pages = []
+        self.page_index = 0
+        self.text = text
+        self._hover_btn = ""
+        self._resize_to_fit()
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+        self.update()
+
+    def clear_ask(self):
+        """退出确认模式，气泡回到普通样式。"""
+        if not self.ask_id:
+            return
+        self.ask_id = ""
+        self._hover_btn = ""
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._resize_to_fit()
+        self.update()
 
     def max_text_height(self) -> int:
         """单页文字可用高度（随屏幕大小变，避免长回复顶出屏幕）。"""
@@ -608,6 +712,8 @@ class Bubble(QWidget):
         h = rect.height() + self._pad * 2 + 4
         if len(self.pages) > 1:
             h += 18          # 右下角页码占位
+        if self.ask_id:
+            h += self.BTN_H + 12   # 底部按钮占位
         return w, h
 
     def size_for_side(self, side: str):
@@ -630,6 +736,18 @@ class Bubble(QWidget):
             self.resize(*new_size)
             if not quiet:
                 self.size_changed.emit()
+        if self.ask_id:
+            self._layout_buttons()
+
+    def _layout_buttons(self):
+        """把两个按钮排在气泡右下角（允许靠右——确认动作放外侧）。"""
+        r = self._body_rect()
+        bw, bh, gap = self.BTN_W, self.BTN_H, self.BTN_GAP
+        # 按钮在气泡正文区内、贴着内边距排（不能越出圆角矩形）
+        y = r.bottom() - self._pad - bh + 2
+        x_allow = r.right() - self._pad - bw
+        self._btn_allow = QRectF(x_allow, y, bw, bh)
+        self._btn_deny = QRectF(x_allow - gap - bw, y, bw, bh)
 
     def _body_rect(self) -> QRectF:
         w, h = self.width(), self.height()
@@ -684,6 +802,8 @@ class Bubble(QWidget):
         text_rect = r.adjusted(self._pad, self._pad, -self._pad, -self._pad)
         if len(self.pages) > 1:
             text_rect = text_rect.adjusted(0, 0, 0, -14)   # 给页码留位
+        if self.ask_id:
+            text_rect = text_rect.adjusted(0, 0, 0, -(self.BTN_H + 10))
         p.drawText(
             text_rect,
             int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft
@@ -703,13 +823,32 @@ class Bubble(QWidget):
                 f"{self.page_index + 1} / {len(self.pages)}",
             )
 
-        # 右上角小 ×：提示气泡可以点击关闭
-        fx = QFont(self.font)
-        fx.setPointSize(max(7, self.font.pointSize() - 2))
-        p.setFont(fx)
-        p.setPen(QColor(150, 158, 170, 170))
-        p.drawText(r.adjusted(-self._pad, 2, 2, 0),
-                   int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop), "×")
+        # 确认模式：底部两个按钮
+        if self.ask_id:
+            self._layout_buttons()
+            fb = QFont(self.font)
+            fb.setPointSize(max(8, self.font.pointSize() - 1))
+            p.setFont(fb)
+
+            p.setBrush(QColor(255, 255, 255, 240))
+            p.setPen(QPen(QColor(150, 158, 170, 220), 1.2))
+            p.drawRoundedRect(self._btn_deny, 8, 8)
+            p.setPen(QColor(88, 98, 112))
+            p.drawText(self._btn_deny, int(Qt.AlignmentFlag.AlignCenter), "拒绝")
+
+            p.setBrush(QColor("#4379c4") if self._hover_btn == "allow" else QColor("#5a8fdb"))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(self._btn_allow, 8, 8)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(self._btn_allow, int(Qt.AlignmentFlag.AlignCenter), "允许一次")
+        else:
+            # 右上角小 ×：提示气泡可以点击关闭
+            fx = QFont(self.font)
+            fx.setPointSize(max(7, self.font.pointSize() - 2))
+            p.setFont(fx)
+            p.setPen(QColor(150, 158, 170, 170))
+            p.drawText(r.adjusted(-self._pad, 2, 2, 0),
+                       int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop), "×")
 
     def hideEvent(self, e):
         self._stop_paging()
@@ -745,6 +884,11 @@ class PetWindow(QWidget):
         self.bubble = Bubble()
         self.bubble.size_changed.connect(self._position_bubble)
         self.bubble.closed_by_user.connect(self._on_bubble_closed)
+        self.bubble.answered.connect(self._on_approval_answer)
+        # 敏感操作确认：DSH 界面不在场时由桥转过来，在这里排队一条条问
+        self._approvals = []
+        self._ask_active_id = ""
+        self._ask_delay_active = False   # 已排了一次「延迟显示」（躲开界面先答的窗口）
         self._placing = False        # 摆位重入保护
         self._bubble_ready = True    # moveEvent 里判断 bubble 是否已建好
         self.persona_name = persona.active_name() or "大肥鱼"
@@ -1649,7 +1793,94 @@ class PetWindow(QWidget):
             ("finished_ok", self._on_done),
             ("session_ready", self._on_dsh_session),
             ("thinking", self._on_dsh_thinking),
+            ("approval", self._on_approval_request),
+            ("approval_closed", self._on_approval_closed),
         ])
+
+    # ---------- 审批确认（敏感操作的权限） ----------
+
+    def _on_approval_request(self, payload):
+        """DSH 要用户确认一个敏感操作 → 气泡上弹「拒绝 / 允许一次」。
+
+        触发条件：这条会话没在 DSH 界面里打开（界面在时会由界面自己弹窗）。
+        """
+        req = payload if isinstance(payload, dict) else {}
+        rid = str(req.get("id") or "")
+        if not rid:
+            return
+        if rid == self._ask_active_id or any(a["id"] == rid for a in self._approvals):
+            return
+        tool = str(req.get("toolName") or "工具")
+        reason = str(req.get("reason") or "").strip()
+        if len(reason) > 120:
+            reason = reason[:120] + "…"
+        self._approvals.append({"id": rid, "toolName": tool, "reason": reason})
+        trace.log(f"approval ask {rid[:8]} {tool}")
+        if not self._ask_active_id and not self._ask_delay_active:
+            # 延迟 1 秒再弹：界面正开着这条会话时它会先弹窗并作答，
+            # 桥随即撤回这条请求——那就别让气泡闪一下了
+            self._ask_delay_active = True
+            QTimer.singleShot(1000, self._show_next_approval)
+
+    def _show_next_approval(self):
+        self._ask_delay_active = False
+        if not self._approvals:
+            self._ask_active_id = ""
+            return
+        item = self._approvals[0]
+        self._ask_active_id = item["id"]
+        head = f"要用「{item['toolName']}」越权操作"
+        text = f"🔐 {head}\n{item['reason']}\n\n允许这一次吗？" if item["reason"] \
+            else f"🔐 {head}，允许这一次吗？"
+        self.bubble.show_ask(item["id"], text)
+        self.renderer.state = "talking"
+        self._music_bubble_timer = 0.0      # 等用户点，不自动收起
+        trace.log(f"approval show {item['id'][:8]}")
+
+    def _on_approval_answer(self, allow: bool):
+        """用户在气泡上点了「允许一次 / 拒绝」。"""
+        rid = self._ask_active_id
+        if not rid:
+            return
+        trace.log(f"approval answer {rid[:8]} allow={allow}")
+        self._ask_active_id = ""
+        self.bubble.clear_ask()
+        self.bubble.set_text("已允许，继续执行…" if allow else "已拒绝这次操作")
+        self._music_bubble_timer = 5.0
+        self._approvals = [a for a in self._approvals if a["id"] != rid]
+
+        w = ApprovalAnswerWorker(rid, allow)
+        w.done.connect(self._on_approval_sent)
+        w.finished.connect(lambda w=w: self._forget_worker(w))
+        self._live_workers.append(w)
+        w.start()
+
+    def _on_approval_sent(self, rid, allow, err):
+        if err:
+            trace.log(f"approval send failed: {err}")
+            self.bubble.set_text(f"确认没送到 DSH：{err}")
+            self._music_bubble_timer = 8.0
+        QTimer.singleShot(1400, self._show_next_approval)
+
+    def _on_approval_closed(self, rid, outcome):
+        """审批有结果了（自己点的回执 / 界面那边答的 / 超时作废）。"""
+        rid = str(rid or "")
+        self._approvals = [a for a in self._approvals if a["id"] != rid]
+        if rid != self._ask_active_id:
+            return          # 不是当前这条（多半是自己刚点完的回执）
+        self._ask_active_id = ""
+        self.bubble.clear_ask()
+        if outcome == "allowed-once":
+            self.bubble.set_text("已允许，继续执行…")
+            self._music_bubble_timer = 5.0
+        elif outcome == "rejected":
+            self.bubble.set_text("已拒绝这次操作")
+            self._music_bubble_timer = 5.0
+        else:
+            self.bubble.set_text("⚠️ 没等到确认，这次操作被取消了")
+            self._music_bubble_timer = 7.0
+        trace.log(f"approval closed {rid[:8]} {outcome or 'cancel'}")
+        QTimer.singleShot(1400, self._show_next_approval)
 
     # ---------- 思考泡 & DSH 会话监听 ----------
 
@@ -1660,6 +1891,8 @@ class PetWindow(QWidget):
         """
         if not self._from_current():
             return
+        if self._ask_active_id:
+            return          # 正在等用户确认，别把按钮换成思考泡
         if self._chatting and self.renderer.state == "thinking" and not self._pending_reply:
             self.bubble.set_text("(💭 思考中…)")
             self._music_bubble_timer = 0.0
@@ -1681,12 +1914,16 @@ class PetWindow(QWidget):
         self._spawn_worker(w, [
             ("thinking", self._on_watch_thinking),
             ("answering", self._on_watch_answering),
+            ("approval", self._on_approval_request),
+            ("approval_closed", self._on_approval_closed),
         ])
 
     def _on_watch_thinking(self):
         """DSH 桌面版那边进入思考阶段 → 桌宠头上冒思考泡。"""
         if self._chatting or self.ai_mode() != MODE_DSH:
             return
+        if self._ask_active_id:
+            return          # 确认泡优先
         trace.log("watch: DSH thinking")
         self.bubble.set_text("(💭 想事情中…)")
         self.renderer.state = "thinking"
@@ -1697,6 +1934,8 @@ class PetWindow(QWidget):
         """思考阶段结束（DSH 开始吐正文）→ 思考泡收掉，桌宠回待机。"""
         if not self._watch_think or self._chatting:
             return
+        if self._ask_active_id:
+            return          # 审批泡还在等用户点，别收掉
         trace.log("watch: DSH answering")
         self._watch_think = False
         self.bubble.hide()
@@ -1755,6 +1994,8 @@ class PetWindow(QWidget):
         """工具调用的过程提示。正文还没开始流时占用气泡，开始了就不打扰。"""
         if not self._from_current():
             return
+        if self._ask_active_id:
+            return          # 确认泡不能被「正在用 xxx」盖掉
         if not self._pending_reply:
             self.bubble.set_text(f"（{text}）")
             self._music_bubble_timer = 3.0
@@ -1808,6 +2049,9 @@ class PetWindow(QWidget):
             self._pending_reply = ""
             trace.log(f"enter _on_chunk 首帧 ({len(piece)} 字) mode={self.ai_mode()}")
         self._pending_reply += piece
+        # 确认泡占着气泡时不刷正文（审批期间模型本来也停着，别把按钮冲掉）
+        if self._ask_active_id:
+            return
         # 流式阶段也清洗，避免反引号/星号一闪而过。
         # 但不要每个 token 都改气泡：一次长回答可能有几百个 chunk，每个都
         # setFixedSize + move + raise_ 会在 Windows 上引发窗口几何消息风暴。

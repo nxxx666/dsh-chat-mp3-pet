@@ -116,11 +116,14 @@ class StreamEvent:
     """归一化后的流事件。
 
     kind:
-      delta     — 流式增量（text 是要追加的片段）
-      message   — 一整条 assistant 消息（text 是完整内容）
-      tool      — 工具调用/结果（text 是描述）
-      status    — 状态变化（thinking / turn_end）
-      error     — 出错
+      delta           — 流式增量（text 是要追加的片段）
+      message         — 一整条 assistant 消息（text 是完整内容）
+      tool            — 工具调用/结果（text 是描述）
+      status          — 状态变化（thinking / turn_end）
+      error           — 出错
+      approval        — 需要用户确认某个敏感操作（raw 里带 id/toolName/reason）
+      approval_done   — 审批已有结果（text 是 id，raw 里带 outcome）
+      approval_cancel — 审批作废/超时（text 是 id）
     """
 
     __slots__ = ("kind", "text", "raw")
@@ -188,6 +191,17 @@ def parse_frame(frame):
 
     if ftype == "snapshot":
         return []              # 开场快照（历史），桌宠不回溯显示
+
+    # ---- 审批（敏感操作的权限确认）----
+    # 桥在 DSH 界面不在场时会把它转过来，这里当成一条「要用户作答」的事件。
+    if ftype == "approval":
+        tool = str(frame.get("toolName") or "工具")
+        reason = str(frame.get("reason") or "").strip()
+        return [StreamEvent("approval", reason or f"要用「{tool}」越权操作", frame)]
+    if ftype == "approval/decided":
+        return [StreamEvent("approval_done", str(frame.get("id") or ""), frame)]
+    if ftype in ("approval/cancel", "approval/timeout"):
+        return [StreamEvent("approval_cancel", str(frame.get("id") or ""), frame)]
 
     if ftype == "bridge/error":
         return [StreamEvent("error", str(frame.get("error") or "桥插件报错"), frame)]
@@ -289,6 +303,24 @@ class DshClient:
             return bool(r.json().get("ok"))
         except (requests.RequestException, ValueError):
             return False
+
+    def approve(self, request_id, allow=True):
+        """回答一次审批：allow=True「允许一次」，False「拒绝」。
+
+        返回 (ok, error)。审批已超时/已作答时桥会回 404，按「气泡该收掉」处理。
+        """
+        try:
+            r = requests.post(
+                f"{self.base}/approve",
+                json={"id": request_id, "decision": "allow" if allow else "deny"},
+                timeout=TIMEOUT,
+            )
+            data = r.json()
+            if data.get("ok"):
+                return True, ""
+            return False, str(data.get("error") or "回答失败")
+        except (requests.RequestException, ValueError) as exc:
+            return False, f"连不上桥插件：{exc}"
 
     # ---------- 流 ----------
     def stream(self, on_event, stop_flag=None, session_id=None, read_timeout=None):
