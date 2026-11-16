@@ -1549,6 +1549,17 @@ class PetWindow(QWidget):
             self.bubble.set_text("改回独立 AI 了")
         self._music_bubble_timer = 7.0
 
+    @staticmethod
+    def _bridge_outdated(version: str) -> bool:
+        """桥插件是不是老版本（0.2.0 才有「越权操作在桌宠上确认」）。"""
+        try:
+            parts = [int(x) for x in str(version or "").split(".")[:3]]
+        except ValueError:
+            return True
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts) < (0, 2, 0)
+
     def check_dsh(self):
         if dsh_client is None:
             QMessageBox.warning(self, "DSH", "当前版本没带 DSH 客户端模块。")
@@ -1556,12 +1567,19 @@ class PetWindow(QWidget):
         host, port, why = dsh_client.bridge_info()
         ok, info = dsh_client.DshClient(host, port).health()
         if ok:
+            version = str(info.get("version") or "0.1.x")
+            tip = ""
+            if self._bridge_outdated(version):
+                tip = ("\n\n⚠️ 桥插件版本偏旧：越权操作（权限确认）不会在桌宠上弹，\n"
+                       "   更新 dsh-bridge 到 0.2.0 后重启一次 DSH")
             QMessageBox.information(
                 self, "DSH 连接正常",
                 "桥插件在线\n"
+                f"版本：{version}\n"
                 f"地址：{host}:{info.get('port')}\n"
                 f"DSH 当前会话：{info.get('lastSessionId') or '（还没选中）'}\n"
-                f"桌宠用的会话：{self._dsh_session_id or '（下次说话时新建）'}")
+                f"桌宠用的会话：{self._dsh_session_id or '（下次说话时新建）'}"
+                f"{tip}")
         else:
             QMessageBox.warning(
                 self, "DSH 没连上",
