@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (QApplication, QDialog, QInputDialog, QLineEdit,
                              QMenu, QMessageBox, QWidget)
 
 import ai_settings
+import chat_panel
 import config_store
 import live2d_view
 import llm_client
@@ -250,6 +251,8 @@ class DshWatchWorker(QThread):
     approval = pyqtSignal(object)           # 要用户确认的敏感操作
     approval_closed = pyqtSignal(str, str)  # (id, outcome)
     task_done = pyqtSignal()                # DSH 界面里的一轮带工具的回合跑完了
+    watch_delta = pyqtSignal(str)           # DSH 界面聊天的正文增量 → 聊天窗口
+    watch_done = pyqtSignal(str)            # 一轮正文收尾（全文）→ 聊天窗口
 
     IDLE_WAIT = 8.0     # 桥没通 / 没会话时的轮询间隔
     RETRY_WAIT = 3.0    # 流断了之后的重连间隔
@@ -344,6 +347,7 @@ class DshWatchWorker(QThread):
                         self._set_target(sid)
 
                     saw_tool = False        # 这一轮有没有用过工具
+                    watch_buf = []          # DSH 界面聊天的正文（→ 聊天窗口）
 
                     def on_event(ev):
                         nonlocal saw_tool
@@ -352,9 +356,18 @@ class DshWatchWorker(QThread):
                         if ev.kind == "status":
                             if ev.text == "thinking":
                                 self.thinking.emit()
+                            elif ev.text == "turn_end" and watch_buf:
+                                self.watch_done.emit("".join(watch_buf))
+                                watch_buf.clear()
                         elif ev.kind == "delta":
                             # 正文来了：思考阶段结束，桌宠把思考泡收掉
                             self.answering.emit()
+                            watch_buf.append(ev.text)
+                            self.watch_delta.emit(ev.text)
+                        elif ev.kind == "message":
+                            # 非流式整条正文（旧协议兜底）：只在没增量时用
+                            if not watch_buf:
+                                self.watch_done.emit(ev.text)
                         elif ev.kind == "tool":
                             saw_tool = True
                         elif ev.kind == "approval":
@@ -1078,6 +1091,9 @@ class PetWindow(QWidget):
         self._ask_delay_active = False   # 已排了一次「延迟显示」（躲开界面先答的窗口）
         self._placing = False        # 摆位重入保护
         self._bubble_ready = True    # moveEvent 里判断 bubble 是否已建好
+        # 微信风格聊天窗口：懒创建（右键菜单「聊天界面」打开）
+        self._chat_win = None
+        self._watch_reply_buf = ""   # 监听线程看到的 DSH 界面回复（→ 聊天窗口）
         self.persona_name = persona.active_name() or "大肥鱼"
         self.persona_text = persona.load(self.persona_name)
         self.setWindowTitle(self.persona_name)
@@ -1462,6 +1478,7 @@ class PetWindow(QWidget):
         )
 
         menu.addAction("聊聊天", self.start_chat)
+        menu.addAction("聊天界面（看记录）", self._open_chat)
 
         # 正在跑任务时给一个醒目的打断入口（平时不显示，不占菜单）
         if self._chatting:
@@ -1951,6 +1968,62 @@ class PetWindow(QWidget):
             return
         self.send(text.strip())
 
+    # ---------- 微信风格聊天窗口 ----------
+
+    def _open_chat(self):
+        """打开（或置前）微信风格的聊天界面。"""
+        if self._chat_win is None:
+            w = chat_panel.ChatWindow()
+            w.message_sent.connect(self._on_chat_send)
+            w.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+            self._chat_win = w
+        self._chat_win.set_title(f"和{self.persona_name}聊天")
+        self._chat_win.show()
+        self._chat_win.raise_()
+        self._chat_win.activateWindow()
+        trace.log("chat window open")
+
+    def _on_chat_send(self, text: str):
+        """用户在聊天窗口按了发送。"""
+        if self._chatting and self.worker and self.worker.isRunning():
+            self.interrupt_chat()
+        if self.ai_mode() != MODE_DSH and not ai_settings.ensure_ready(
+                self, self.cfg):
+            if self._chat_win is not None:
+                self._chat_win.append_error("还没填 API Key：右键桌宠 →「AI 设置」填一下")
+            self.bubble.set_text("还没填 API Key，右键 →「AI 设置」填一下就能聊啦")
+            self._music_bubble_timer = 7.0
+            return
+        self.send(text, from_chat=True)
+
+    def _chat_user(self, text: str):
+        if self._chat_win is not None:
+            self._chat_win.append_user(text)
+
+    def _chat_stream(self, clean_text: str):
+        if self._chat_win is not None:
+            self._chat_win.stream_ai_update(clean_text)
+
+    def _chat_note(self, text: str):
+        if self._chat_win is not None:
+            self._chat_win.append_note(text)
+
+    def _on_watch_delta(self, piece: str):
+        """用户在 DSH 界面聊天：正文增量同步进聊天窗口（桌宠气泡不打扰）。"""
+        if self._chatting:
+            return          # 桌宠自己这轮的回复走 _on_chunk，别重复
+        self._watch_reply_buf += piece
+        if self._chat_win is not None:
+            self._chat_win.stream_ai_update(self._watch_reply_buf)
+
+    def _on_watch_done(self, full: str):
+        """DSH 界面那轮聊天收尾 → 聊天窗口定型。"""
+        if self._chatting:
+            return
+        self._watch_reply_buf = ""
+        if self._chat_win is not None:
+            self._chat_win.stream_ai_finish(full)
+
     def _messages_for_api(self) -> list:
         """拼一次请求用的消息。
 
@@ -2045,6 +2118,7 @@ class PetWindow(QWidget):
         if len(reason) > 120:
             reason = reason[:120] + "…"
         self._approvals.append({"id": rid, "toolName": tool, "reason": reason})
+        self._chat_note(f"🔐 想用「{tool}」越权操作{('：' + reason) if reason else ''}")
         trace.log(f"approval ask {rid[:8]} {tool}")
         if not self._ask_active_id and not self._ask_delay_active:
             # 延迟 1 秒再弹：界面正开着这条会话时它会先弹窗并作答，
@@ -2147,6 +2221,8 @@ class PetWindow(QWidget):
             ("approval", self._on_approval_request),
             ("approval_closed", self._on_approval_closed),
             ("task_done", self._on_task_done),
+            ("watch_delta", self._on_watch_delta),
+            ("watch_done", self._on_watch_done),
         ])
 
     def _on_watch_thinking(self):
@@ -2250,15 +2326,19 @@ class PetWindow(QWidget):
         """工具调用的过程提示。正文还没开始流时占用气泡，开始了就不打扰。"""
         if not self._from_current():
             return
+        self._chat_note(text)
         if self._ask_active_id:
             return          # 确认泡不能被「正在用 xxx」盖掉
         if not self._pending_reply:
             self.bubble.set_text(f"（{text}）")
             self._music_bubble_timer = 3.0
 
-    def send(self, text: str):
+    def send(self, text: str, from_chat: bool = False):
         trace.log(f"send [{self.ai_mode()}] {len(text)} 字：{text[:24]!r}")
         self._interrupted = False
+        # 用户这句话进聊天窗口（从聊天窗口发来的已经显示过，不重复）
+        if not from_chat:
+            self._chat_user(text)
         if self.ai_mode() == MODE_DSH:
             self._send_via_dsh(text)
             return
@@ -2315,12 +2395,16 @@ class PetWindow(QWidget):
         now = time.monotonic()
         if now - self._last_paint >= PAINT_INTERVAL:
             self._last_paint = now
-            self.bubble.set_text(text_clean.clean(self._pending_reply))
+            clean = text_clean.clean(self._pending_reply)
+            self.bubble.set_text(clean)
+            self._chat_stream(clean)
 
     def _flush_reply_paint(self):
         """把攒下的增量补刷一次（收尾/兜底用）。"""
         if self._pending_reply:
-            self.bubble.set_text(text_clean.clean(self._pending_reply))
+            clean = text_clean.clean(self._pending_reply)
+            self.bubble.set_text(clean)
+            self._chat_stream(clean)
 
     def _on_done(self, full: str):
         if not self._from_current():
@@ -2330,6 +2414,8 @@ class PetWindow(QWidget):
         self._chatting = False
         self.renderer.state = "idle"
         clean_text = text_clean.clean(full)
+        if self._chat_win is not None:
+            self._chat_win.stream_ai_finish(clean_text)
         if self._interrupted:
             self._interrupted = False
             # 被打断的收尾：有半截话就带着，没有就直接说停了；
@@ -2403,6 +2489,9 @@ class PetWindow(QWidget):
             msg = "已停下。想接着做就说「继续」"
         self._chatting = False
         self.renderer.state = "idle"
+        if self._chat_win is not None:
+            self._chat_win.stream_ai_abort()
+            self._chat_win.append_error(msg)
         self.bubble.set_text(f"({msg})")
         self._music_bubble_timer = 6.0
         # DSH 模式：失败了也把监听挂回去（DSH 之后恢复连接时能自动接上）
