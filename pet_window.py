@@ -6,6 +6,7 @@
 3. 流式返回用 pyqtSignal 逐字推给界面
 """
 
+import math
 import os
 import random
 import threading
@@ -123,6 +124,7 @@ class DshChatWorker(QThread):
     thinking = pyqtSignal()      # DSH 正在思考（reasoning 阶段）→ 头上冒思考泡
     approval = pyqtSignal(object)     # 要用户确认的敏感操作（dict：id/toolName/reason）
     approval_closed = pyqtSignal(str, str)  # (id, outcome) 审批已有结果/作废
+    task_done = pyqtSignal()     # 这一轮用过工具且正常跑完 → 任务完成，冒小花
 
     def __init__(self, text: str, session_id: str = "", dsh_exe: str = ""):
         super().__init__()
@@ -143,6 +145,7 @@ class DshChatWorker(QThread):
     def run(self):
         buf = []
         whole = []
+        saw_tool = False         # 这一轮 DSH 用没用工具（用过 = 算「任务」）
         try:
             self.client = dsh_client.DshClient()
             if self._stop_ev.is_set():
@@ -176,6 +179,7 @@ class DshChatWorker(QThread):
                 self.session_ready.emit(sid)
 
             def on_event(ev):
+                nonlocal saw_tool
                 if self._stop_ev.is_set():
                     return
                 if ev.kind == "delta":
@@ -184,6 +188,7 @@ class DshChatWorker(QThread):
                 elif ev.kind == "message":
                     whole.append(ev.text)
                 elif ev.kind == "tool":
+                    saw_tool = True
                     self.note.emit(ev.text)
                 elif ev.kind == "status":
                     if ev.text == "thinking":
@@ -199,7 +204,7 @@ class DshChatWorker(QThread):
                 elif ev.kind == "error":
                     self.failed.emit(ev.text)
 
-            self.client.stream(on_event, self._stop_ev, session_id=sid)
+            turn_ok = self.client.stream(on_event, self._stop_ev, session_id=sid)
             if self._stop_ev.is_set():
                 # 线程刚起步那会儿被打断的话，stop() 里的 cancel 可能抢在
                 # prompt 前发（甚至没发）。这里再补一发，确保 DSH 侧这轮真的停
@@ -207,6 +212,9 @@ class DshChatWorker(QThread):
                     self.client.cancel()
                 except Exception:
                     pass
+            elif turn_ok and saw_tool:
+                # 用过工具且这轮正常收尾 = 任务完成 → 通知界面冒小花
+                self.task_done.emit()
 
             # 增量拼出来的和提交的整条消息取更完整的那个
             streamed = "".join(buf)
@@ -241,6 +249,7 @@ class DshWatchWorker(QThread):
     answering = pyqtSignal()
     approval = pyqtSignal(object)           # 要用户确认的敏感操作
     approval_closed = pyqtSignal(str, str)  # (id, outcome)
+    task_done = pyqtSignal()                # DSH 界面里的一轮带工具的回合跑完了
 
     IDLE_WAIT = 8.0     # 桥没通 / 没会话时的轮询间隔
     RETRY_WAIT = 3.0    # 流断了之后的重连间隔
@@ -334,7 +343,10 @@ class DshWatchWorker(QThread):
                         trace.log(f"watch: 监听会话 -> {sid[:20]}")
                         self._set_target(sid)
 
+                    saw_tool = False        # 这一轮有没有用过工具
+
                     def on_event(ev):
+                        nonlocal saw_tool
                         if self._stop_ev.is_set():
                             return
                         if ev.kind == "status":
@@ -343,6 +355,8 @@ class DshWatchWorker(QThread):
                         elif ev.kind == "delta":
                             # 正文来了：思考阶段结束，桌宠把思考泡收掉
                             self.answering.emit()
+                        elif ev.kind == "tool":
+                            saw_tool = True
                         elif ev.kind == "approval":
                             # 界面里没开这条会话时，桥会把权限确认转给桌宠
                             self.approval.emit(ev.raw or {})
@@ -354,8 +368,13 @@ class DshWatchWorker(QThread):
 
                     # read_timeout：桥有心跳保活，正常时永远不会触发；
                     # 桥死了（DSH 被关掉）35 秒内读超时 → 走重连逻辑
-                    client.stream(on_event, self._stop_ev, session_id=sid,
-                                  read_timeout=35.0)
+                    ended = client.stream(on_event, self._stop_ev, session_id=sid,
+                                          read_timeout=35.0)
+                    # 正常收尾 + 这轮用过工具 = DSH 界面里完成了一个任务
+                    # （会话被切走时流是被 close() 掐断的，不算完成）
+                    if (ended and saw_tool and not self._stop_ev.is_set()
+                            and not getattr(client, "_closed", False)):
+                        self.task_done.emit()
                 except Exception:
                     pass
                 finally:
@@ -856,6 +875,168 @@ class Bubble(QWidget):
 
 
 # ============================================================
+# 任务完成庆祝：身上冒小花
+# ============================================================
+
+# 花瓣配色（粉 / 珊瑚 / 天蓝 / 白），花心统一暖黄
+FLOWER_COLORS = (
+    QColor(255, 158, 196),   # 粉
+    QColor(255, 138, 128),   # 珊瑚
+    QColor(130, 177, 255),   # 天蓝
+    QColor(255, 245, 245),   # 近白
+)
+CENTER_COLOR = QColor(255, 213, 79)
+SPARK_COLOR = QColor(255, 236, 140)
+
+
+class CelebrationOverlay(QWidget):
+    """盖在角色层上面的透明庆祝层。
+
+    只负责画粒子（小花 / 星光 / 小圆点），鼠标事件全部穿透，不影响
+    拖动桌宠和右键菜单。粒子的位置推进由 PetWindow._tick 每帧调
+    step() 驱动；没有粒子时完全不重绘，不产生空转。
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._particles = []
+
+    def active(self) -> bool:
+        return bool(self._particles)
+
+    def burst(self, cx: float, cy: float, count: int = 18):
+        """在 (cx, cy) 附近炸出一把小花。count 里花、星光、圆点混着来。"""
+        w = max(1, self.width())
+        h = max(1, self.height())
+        for i in range(count):
+            roll = i % 3
+            kind = ("flower", "spark", "dot")[roll]
+            self._particles.append({
+                "kind": kind,
+                # 出生点：以传入中心为核，撒一个椭圆区域
+                "x": cx + random.uniform(-w * 0.18, w * 0.18),
+                "y": cy + random.uniform(-h * 0.07, h * 0.12),
+                "vx": random.uniform(-16, 16),
+                "vy": random.uniform(-100, -55),     # 先往上飘
+                "g": random.uniform(16, 32),         # 再被轻轻拽回来，形成抛物线
+                "sway": random.uniform(5, 14),       # 左右摇摆幅度
+                "freq": random.uniform(1.8, 3.4),
+                "phase": random.uniform(0.0, 6.283),
+                "r": random.uniform(7.5, 13) if kind == "flower"
+                     else random.uniform(3.5, 7),
+                "rot": random.uniform(0, 360),
+                "spin": random.uniform(-100, 100),
+                "life": 0.0,
+                "ttl": random.uniform(2.0, 2.8),
+                "delay": random.uniform(0.0, 0.5),   # 错开出场，不是一坨同时炸
+                "color": random.choice(FLOWER_COLORS),
+            })
+        self.update()
+
+    def clear(self):
+        self._particles = []
+        self.update()
+
+    def step(self, dt: float):
+        """推进粒子。有粒子在飞（或刚清完最后一帧）才请求重绘。"""
+        if not self._particles:
+            return
+        alive = []
+        for p in self._particles:
+            if p["delay"] > 0:
+                p["delay"] -= dt
+                alive.append(p)
+                continue
+            p["life"] += dt
+            if p["life"] < p["ttl"]:
+                p["rot"] += p["spin"] * dt
+                alive.append(p)
+        self._particles = alive
+        self.update()        # 粒子减少到 0 的那一帧也要刷，把残影擦掉
+
+    # ---------- 绘制 ----------
+    def _alpha_of(self, p) -> float:
+        """淡入（前 12%）+ 淡出（后 40%）的透明度曲线。"""
+        k = p["life"] / p["ttl"]
+        if k < 0.12:
+            return k / 0.12
+        if k > 0.6:
+            return max(0.0, 1.0 - (k - 0.6) / 0.4)
+        return 1.0
+
+    def _pos_of(self, p):
+        t = p["life"]
+        x = p["x"] + p["vx"] * t + p["sway"] * math.sin(p["freq"] * t + p["phase"])
+        y = p["y"] + p["vy"] * t + 0.5 * p["g"] * t * t
+        return x, y
+
+    def paintEvent(self, _):
+        if not self._particles:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for p_ in self._particles:
+            if p_["delay"] > 0:
+                continue
+            a = self._alpha_of(p_)
+            if a <= 0.01:
+                continue
+            x, y = self._pos_of(p_)
+            # 出场时从 0 弹到全尺寸（前 0.18s），带一点「啵」的感觉
+            grow = min(1.0, p_["life"] / 0.18)
+            r = p_["r"] * grow
+            if r <= 0.5:
+                continue
+            p.save()
+            p.translate(x, y)
+            p.rotate(p_["rot"])
+            if p_["kind"] == "flower":
+                self._draw_flower(p, r, p_["color"], a)
+            elif p_["kind"] == "spark":
+                self._draw_spark(p, r, a)
+            else:
+                c = QColor(p_["color"])
+                c.setAlphaF(a * 0.85)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(c)
+                p.drawEllipse(QPointF(0, 0), r * 0.45, r * 0.45)
+            p.restore()
+
+    @staticmethod
+    def _draw_flower(p: QPainter, r: float, petal: QColor, alpha: float):
+        col = QColor(petal)
+        col.setAlphaF(alpha)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(col)
+        for i in range(5):
+            p.save()
+            p.rotate(72.0 * i)
+            p.drawEllipse(QPointF(0, -r * 0.72), r * 0.42, r * 0.62)
+            p.restore()
+        center = QColor(CENTER_COLOR)
+        center.setAlphaF(alpha)
+        p.setBrush(center)
+        p.drawEllipse(QPointF(0, 0), r * 0.34, r * 0.34)
+
+    @staticmethod
+    def _draw_spark(p: QPainter, r: float, alpha: float):
+        """四芒星光。"""
+        col = QColor(SPARK_COLOR)
+        col.setAlphaF(alpha)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(col)
+        k = r * 0.26
+        pts = [
+            QPointF(0, -r), QPointF(k, -k), QPointF(r, 0), QPointF(k, k),
+            QPointF(0, r), QPointF(-k, k), QPointF(-r, 0), QPointF(-k, -k),
+        ]
+        p.drawPolygon(pts)
+
+
+# ============================================================
 # 主窗口
 # ============================================================
 class PetWindow(QWidget):
@@ -877,6 +1058,12 @@ class PetWindow(QWidget):
         self.live2d_mode = self._setup_live2d()
         self.setFixedSize(*self._scaled_size())
         self.setWindowTitle("桌宠")
+
+        # 任务完成庆祝层：盖在角色（含 Live2D GL 层）上面，鼠标事件穿透
+        self._celebrate_on = bool(self.cfg.get("celebrate_done", True))
+        self._celebration = CelebrationOverlay(self)
+        self._celebration.setGeometry(0, 0, self.width(), self.height())
+        self._celebration.raise_()
 
         # AI 后端参数：命令行 --model / --host 只在显式给出时覆盖配置
         self._cli_model = model
@@ -1018,6 +1205,7 @@ class PetWindow(QWidget):
         self.gl_view = None
         self.live2d_mode = False
         self.setFixedSize(*self._scaled_size(live2d=False))
+        self._sync_celebration_layer()
         self.update()
 
     # ---------- 大小缩放 ----------
@@ -1058,6 +1246,7 @@ class PetWindow(QWidget):
         self.setFixedSize(w, h)
         if self.gl_view is not None:
             self.gl_view.set_view_size(w, h)
+        self._sync_celebration_layer()
         self.move(cx - w // 2, bottom - h)
         self._keep_on_screen()
 
@@ -1117,6 +1306,9 @@ class PetWindow(QWidget):
                 self.bubble.hide()
                 if self.renderer.state == "talking":
                     self.renderer.state = "idle"
+
+        # 任务完成的小花：有粒子在飞才推进（内部只在需要时请求重绘）
+        self._celebration.step(dt)
 
         self.update()
         if self.live2d_mode and self.gl_view is not None:
@@ -1202,6 +1394,21 @@ class PetWindow(QWidget):
         # 拖动/挪动桌宠时气泡跟着重摆，别留在原地指向空气
         if getattr(self, "_bubble_ready", False):
             self._position_bubble()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._sync_celebration_layer()
+
+    def _sync_celebration_layer(self):
+        """庆祝层铺满窗口并保持压在角色（含 Live2D GL 层）上面。
+
+        窗口显示着的时候 resizeEvent 会自动调；缩放入口再显式调一次，
+        保证任何路径下都不会漏。
+        """
+        c = getattr(self, "_celebration", None)
+        if c is not None:
+            c.setGeometry(0, 0, self.width(), self.height())
+            c.raise_()
 
     def paintEvent(self, _):
         if self.live2d_mode:
@@ -1331,6 +1538,10 @@ class PetWindow(QWidget):
                     act.triggered.connect(
                         lambda _=False, k=key: self._switch_pose(k))
         # ---- 大小 ----
+        act_flower = menu.addAction("完成任务时冒小花")
+        act_flower.setCheckable(True)
+        act_flower.setChecked(self._celebrate_on)
+        act_flower.triggered.connect(self._toggle_celebrate)
         sub_s = menu.addMenu(f"大小（当前 {int(round(self.pet_scale * 100))}%）")
         sub_s.addAction("放大一点  ＋", self.zoom_in)
         sub_s.addAction("缩小一点  －", self.zoom_out)
@@ -1666,7 +1877,7 @@ class PetWindow(QWidget):
             return
         trace.log(f"retire worker {type(w).__name__} running={running}")
         for name in ("chunk", "note", "failed", "finished_ok", "session_ready",
-                     "thinking", "answering"):
+                     "thinking", "answering", "task_done"):
             sig = getattr(w, name, None)
             if sig is None:
                 continue
@@ -1813,6 +2024,7 @@ class PetWindow(QWidget):
             ("thinking", self._on_dsh_thinking),
             ("approval", self._on_approval_request),
             ("approval_closed", self._on_approval_closed),
+            ("task_done", self._on_task_done),
         ])
 
     # ---------- 审批确认（敏感操作的权限） ----------
@@ -1934,6 +2146,7 @@ class PetWindow(QWidget):
             ("answering", self._on_watch_answering),
             ("approval", self._on_approval_request),
             ("approval_closed", self._on_approval_closed),
+            ("task_done", self._on_task_done),
         ])
 
     def _on_watch_thinking(self):
@@ -1973,6 +2186,31 @@ class PetWindow(QWidget):
             self.bubble.hide()
             if self.renderer.state == "thinking":
                 self.renderer.state = "idle"
+
+    # ---------- 任务完成庆祝 ----------
+
+    def _on_task_done(self):
+        """DSH 那边一个带工具的回合正常跑完 → 身上冒小花。"""
+        if not self._from_current():
+            return          # 旧线程迟到的信号，别理
+        self._celebrate()
+
+    def _celebrate(self):
+        """冒一把小花。位置取角色上半身（胸口附近），两种渲染模式通用。"""
+        if not self._celebrate_on:
+            return
+        w, h = self.width(), self.height()
+        self._celebration.burst(w / 2.0, h * 0.34)
+        trace.log("celebrate: 任务完成，冒小花")
+
+    def _toggle_celebrate(self, checked: bool):
+        """开关「完成任务时冒小花」，开了当场演示一把。"""
+        self._celebrate_on = bool(checked)
+        self.cfg["celebrate_done"] = self._celebrate_on
+        config_store.save(self.cfg)
+        trace.log(f"celebrate toggled -> {self._celebrate_on}")
+        if self._celebrate_on:
+            self._celebrate()
 
     def interrupt_chat(self):
         """打断当前回合。
